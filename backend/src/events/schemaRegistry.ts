@@ -139,6 +139,40 @@ const v2TaskFailedPayload = z.object({
   failedStage: z.string().optional(),
 });
 
+/**
+ * `ReconciliationEvent` (issue #496) — the payload shape is identical in v1 and
+ * v2: it was introduced alongside schema v2 and every optional field defaults to
+ * absent rather than being back-filled.
+ */
+const reconciliationEventPayload = z.object({
+  runId: z.string().min(1),
+  kind: z.enum(['drift', 'remediation']),
+  driftType: z.enum([
+    'orphaned_locked',
+    'missing_release_tx',
+    'release_unconfirmed',
+    'expired_escrow',
+    'missing_local',
+    'amount_mismatch',
+  ]),
+  balanceId: z.string().min(1),
+  taskId: z.string().optional(),
+  nodeId: z.string().optional(),
+  severity: z.enum(['info', 'warning', 'critical']).optional(),
+  description: z.string(),
+  remediation: z
+    .object({
+      action: z.string(),
+      status: z.enum(['remediated', 'skipped', 'failed', 'manual_review']),
+      txHash: z.string().optional(),
+      reason: z.string().optional(),
+      at: z.string(),
+    })
+    .optional(),
+  previousStatus: z.string().optional(),
+  newStatus: z.string().optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Schema registry — map of version → event type → Zod schema
 // ---------------------------------------------------------------------------
@@ -157,6 +191,7 @@ const schemasByVersion: Record<number, EventPayloadSchemas> = {
     PaymentReleased: v1PaymentReleasedPayload,
     TaskCompleted: v1TaskCompletedPayload,
     TaskFailed: v1TaskFailedPayload,
+    ReconciliationEvent: reconciliationEventPayload,
   },
   2: {
     TaskCreated: v2TaskCreatedPayload,
@@ -167,6 +202,7 @@ const schemasByVersion: Record<number, EventPayloadSchemas> = {
     PaymentReleased: v2PaymentReleasedPayload,
     TaskCompleted: v2TaskCompletedPayload,
     TaskFailed: v2TaskFailedPayload,
+    ReconciliationEvent: reconciliationEventPayload,
   },
 };
 

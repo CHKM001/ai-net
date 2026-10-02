@@ -13,6 +13,7 @@ declare module "@stellar/stellar-sdk" {
     loadAccount(publicKey: string): Promise<AccountResponse>;
     submitTransaction(tx: Transaction): Promise<HorizonResponse>;
     claimableBalances(): ClaimableBalanceCallBuilder;
+    transactions(): TransactionCallBuilder;
   }
 
   export namespace Horizon {
@@ -21,6 +22,7 @@ declare module "@stellar/stellar-sdk" {
       loadAccount(publicKey: string): Promise<AccountResponse>;
       submitTransaction(tx: Transaction): Promise<HorizonResponse>;
       claimableBalances(): ClaimableBalanceCallBuilder;
+      transactions(): TransactionCallBuilder;
     }
   }
 
@@ -47,6 +49,38 @@ declare module "@stellar/stellar-sdk" {
   export interface ClaimableBalancePage {
     records: ClaimableBalanceRecord[];
     next(): Promise<ClaimableBalancePage>;
+  }
+
+  /**
+   * Transaction call builder.
+   *
+   * `forClaimableBalance` is what lets reconciliation find the transaction that
+   * actually claimed an escrow, which is the authoritative proof that a
+   * `released` payment really moved on-chain (issue #496).
+   */
+  export class TransactionCallBuilder {
+    forClaimableBalance(balanceId: string): TransactionCallBuilder;
+    forSigner(accountId: string): TransactionCallBuilder;
+    limit(limit: number): TransactionCallBuilder;
+    call(): Promise<TransactionPage>;
+    transaction(hash: string): TransactionRecordBuilder;
+  }
+
+  export class TransactionRecordBuilder {
+    call(): Promise<TransactionRecord>;
+  }
+
+  export interface TransactionRecord {
+    hash: string;
+    successful: boolean;
+    ledger?: number;
+    ledger_seq?: number;
+    source_account: string;
+  }
+
+  export interface TransactionPage {
+    records: TransactionRecord[];
+    next(): Promise<TransactionPage>;
   }
 
   export interface AccountResponse {

@@ -6,6 +6,7 @@
  */
 export { CircuitOpenError } from '../circuitBreaker.js';
 
+/** Thrown when a request asks for more tokens than the hard cap allows. */
 export class TokenBudgetExceededError extends Error {
   constructor(requested: number, cap: number) {
     super(`Token budget exceeded: requested ${requested}, hard cap is ${cap}`);

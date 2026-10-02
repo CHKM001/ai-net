@@ -129,6 +129,7 @@ export class PaymentService {
         withRetry(() => this.server.submitTransaction(tx))
       );
 
+      const now = new Date().toISOString();
       this.db.insert({
         taskId,
         nodeId,
@@ -136,6 +137,10 @@ export class PaymentService {
         status: "locked",
         amountStroops,
         txHash: null,
+        // The escrow's age is what lets reconciliation decide whether a still
+        // locked payment is expired (issue #496).
+        createdAt: now,
+        updatedAt: now,
       });
 
       if (span) tracingService.endSpan(span.spanId, 'completed', { balanceId });

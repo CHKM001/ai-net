@@ -119,7 +119,29 @@ const envSchema = z.object({
   AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
 
   RECONCILIATION_WEBHOOK_URL: z.string().url().optional(),
-  RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(86_400_000),
+  RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  // ── Payment drift reconciliation (issue #496) ──────────────────────────────
+  /**
+   * Master switch for automatic drift remediation. When `false` a run only
+   * *detects* drift and reports it; nothing is written to the payments table.
+   */
+  RECONCILIATION_REMEDIATION_ENABLED: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
+  /**
+   * How long a `locked` escrow may sit on-chain after its task reached a
+   * terminal unsuccessful state before it is treated as expired and refunded.
+   */
+  RECONCILIATION_ESCROW_EXPIRY_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(86_400_000),
+  /** Maximum claimable balances pulled from Horizon in a single run. */
+  RECONCILIATION_MAX_BALANCES: z.coerce.number().int().positive().default(2_000),
+  /** Maximum release transactions verified against Horizon in a single run. */
+  RECONCILIATION_MAX_TX_LOOKUPS: z.coerce.number().int().positive().default(200),
 
   COMPRESSION_THRESHOLD: z.coerce.number().int().min(0).default(1024),
   COMPRESSION_LEVEL: z.coerce.number().int().min(1).max(9).default(6),

@@ -16,7 +16,7 @@ import { closeErrorDb } from "./db/errorRegistry";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
 import { closeEventStore, getEventStore } from "./events/eventStore";
-import { createDefaultReconciliationService } from "./services/reconciliation";
+import { createDefaultReconciliationService, closeReconciliationDb } from "./services/reconciliation";
 import { DbMaintenanceService, defaultMaintenanceDatabases } from "./services/dbMaintenance";
 import { ErrorRegistryMaintenanceService } from "./services/errorRegistryMaintenance";
 import { EventRetentionService } from "./services/eventRetention";
@@ -63,9 +63,12 @@ async function main() {
     const cleanupService = new AgentCleanupService();
     cleanupService.start();
 
-    // Start daily payment reconciliation
+    // Start payment reconciliation. Issue #496 raises the default cadence from
+    // once a day to every RECONCILIATION_INTERVAL_MS (60 s) so on-chain/off-chain
+    // payment drift is detected and remediated within a minute rather than being
+    // found at the end of the day.
     const reconciliationService = createDefaultReconciliationService();
-    reconciliationService.startDaily(config.RECONCILIATION_INTERVAL_MS);
+    reconciliationService.start(config.RECONCILIATION_INTERVAL_MS);
 
     // Start idempotency key cleanup so the idempotency_keys table stays
     // bounded in production (Issue #657).  The store is initialised here with
@@ -140,7 +143,6 @@ export interface GracefulShutdownExtras {
   globalAgentRegistry?: { shutdown(): void };
   idempotencyStore?: { stopCleanup(): void; close(): void };
 }
-
 /**
  * SIGTERM/SIGINT handler: stop accepting new work, drain in-flight jobs and
  * the WebSocket stream, flush the event store, close every database

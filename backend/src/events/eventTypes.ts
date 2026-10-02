@@ -107,6 +107,56 @@ export interface PaymentReleasedPayload {
 
 // task_completed and task_failed carry no additional payload beyond BaseEvent.
 
+/**
+ * Reconciliation event name (issue #496).
+ *
+ * Exported as a constant so producers and consumers agree on the single
+ * spelling of the discriminator instead of hard-coding the literal. The event
+ * covers both *drift detected* and *drift remediated*, discriminated by
+ * `payload.kind`.
+ */
+export const RECONCILIATION_EVENT = 'ReconciliationEvent' as const;
+
+/** Drift categories reported by a {@link ReconciliationEventEvent}. */
+export type ReconciliationDriftType =
+  | 'orphaned_locked'
+  | 'missing_release_tx'
+  | 'release_unconfirmed'
+  | 'expired_escrow'
+  | 'missing_local'
+  | 'amount_mismatch';
+
+/** Outcome of the remediation attempt carried by a reconciliation event. */
+export interface ReconciliationRemediationOutcome {
+  action: string;
+  status: 'remediated' | 'skipped' | 'failed' | 'manual_review';
+  txHash?: string;
+  reason?: string;
+  at: string;
+}
+
+/** Payload of a `ReconciliationEvent`. */
+export interface ReconciliationEventPayload {
+  /** Run that produced the observation. */
+  runId: string;
+  /** `drift` when something was detected, `remediation` when acted upon. */
+  kind: 'drift' | 'remediation';
+  driftType: ReconciliationDriftType;
+  balanceId: string;
+  taskId?: string;
+  nodeId?: string;
+  severity?: 'info' | 'warning' | 'critical';
+  description: string;
+  remediation?: ReconciliationRemediationOutcome;
+  previousStatus?: string;
+  newStatus?: string;
+}
+
+export interface ReconciliationEventEvent extends BaseEvent {
+  type: typeof RECONCILIATION_EVENT;
+  payload: ReconciliationEventPayload;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -119,7 +169,8 @@ export type EventType =
   | 'PaymentLocked'
   | 'PaymentReleased'
   | 'TaskCompleted'
-  | 'TaskFailed';
+  | 'TaskFailed'
+  | typeof RECONCILIATION_EVENT;
 
 export interface TaskCreatedEvent extends BaseEvent {
   type: 'TaskCreated';
@@ -183,7 +234,8 @@ export type AppEvent =
   | PaymentLockedEvent
   | PaymentReleasedEvent
   | TaskCompletedEvent
-  | TaskFailedEvent;
+  | TaskFailedEvent
+  | ReconciliationEventEvent;
 
 // ---------------------------------------------------------------------------
 // Guards
@@ -219,6 +271,10 @@ export function isTaskCompleted(e: AppEvent): e is TaskCompletedEvent {
 
 export function isTaskFailed(e: AppEvent): e is TaskFailedEvent {
   return e.type === 'TaskFailed';
+}
+
+export function isReconciliationEvent(e: AppEvent): e is ReconciliationEventEvent {
+  return e.type === RECONCILIATION_EVENT;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,5 +353,22 @@ export function makeTaskFailed(
     occurredAt,
     version: CURRENT_EVENT_VERSION,
     payload: error !== undefined ? { error } : undefined,
+  };
+}
+
+/**
+ * Build a `ReconciliationEvent` (`RECONCILIATION_EVENT`) — issue #496.
+ */
+export function makeReconciliationEvent(
+  taskId: string,
+  payload: ReconciliationEventPayload,
+  occurredAt = nowIso()
+): ReconciliationEventEvent {
+  return {
+    type: RECONCILIATION_EVENT,
+    taskId,
+    occurredAt,
+    version: CURRENT_EVENT_VERSION,
+    payload,
   };
 }

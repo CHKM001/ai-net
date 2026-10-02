@@ -38,6 +38,18 @@ Every event, regardless of type, shares these base fields:
 
 ## 3. Event Types and Version History
 
+| Event                 | v1 | v2 | Notes                                     |
+|-----------------------|----|----|-------------------------------------------|
+| `TaskCreated`         | ✅ | ✅ |                                           |
+| `NodeStarted`         | ✅ | ✅ |                                           |
+| `NodeCompleted`       | ✅ | ✅ |                                           |
+| `NodeFailed`          | ✅ | ✅ |                                           |
+| `PaymentLocked`       | ✅ | ✅ |                                           |
+| `PaymentReleased`     | ✅ | ✅ |                                           |
+| `TaskCompleted`       | ✅ | ✅ |                                           |
+| `TaskFailed`          | ✅ | ✅ |                                           |
+| `ReconciliationEvent` | ✅ | ✅ | Added by issue #496 — same shape in both  |
+
 ### 3.1 TaskCreated
 
 Emitted when a task is created and enqueued.
@@ -344,6 +356,84 @@ Adds optional `failedStage` field.
   }
 }
 ```
+
+---
+
+### 3.9 ReconciliationEvent
+
+Exported as `RECONCILIATION_EVENT` from `backend/src/events/eventTypes.ts`.
+
+Emitted by the payment reconciliation service (issue #496) — **twice** for every
+divergence between the local `payments` table and Stellar chain state: once when
+the drift is detected (`payload.kind: "drift"`) and once when it is remediated
+(`payload.kind: "remediation"`). Consumers that only want "something changed"
+can subscribe to both and key off `payload.driftType`.
+
+| `driftType`           | Meaning                                                            |
+|-----------------------|--------------------------------------------------------------------|
+| `orphaned_locked`     | DB says `locked`, no on-chain claimable balance exists               |
+| `missing_release_tx`  | DB says `released`, the release transaction is absent from Horizon  |
+| `release_unconfirmed` | DB says `released`, the claimable balance is still claimable         |
+| `expired_escrow`      | Task reached a terminal unsuccessful state while the escrow is still locked |
+| `missing_local`       | On-chain claimable balance has no local payment record              |
+| `amount_mismatch`     | On-chain and recorded amounts disagree                              |
+
+The payload shape is identical in v1 and v2 — the event was introduced alongside
+schema v2 and every optional field simply defaults to absent.
+
+```jsonc
+// Drift detected
+{
+  "type": "ReconciliationEvent",
+  "taskId": "task_abc123",
+  "occurredAt": "2026-09-01T12:00:00.000Z",
+  "version": 2,
+  "payload": {
+    "runId": "0f3c1c9e-2a51-4d1a-9f4e-0d2b1f2a3c4d",
+    "kind": "drift",
+    "driftType": "expired_escrow",
+    "balanceId": "00000000abc123...",
+    "taskId": "task_abc123",
+    "nodeId": "node_risk",
+    "severity": "warning",
+    "description": "Escrow for task=task_abc123, node=node_risk is still locked on-chain (...)"
+  }
+}
+```
+
+```jsonc
+// Drift remediated
+{
+  "type": "ReconciliationEvent",
+  "taskId": "task_abc123",
+  "occurredAt": "2026-09-01T12:00:01.000Z",
+  "version": 2,
+  "payload": {
+    "runId": "0f3c1c9e-2a51-4d1a-9f4e-0d2b1f2a3c4d",
+    "kind": "remediation",
+    "driftType": "expired_escrow",
+    "balanceId": "00000000abc123...",
+    "taskId": "task_abc123",
+    "nodeId": "node_risk",
+    "severity": "warning",
+    "description": "Escrow for task=task_abc123, node=node_risk is still locked on-chain (...)",
+    "remediation": {
+      "action": "refund_escrow",
+      "status": "remediated",
+      "txHash": "9f2c...",
+      "at": "2026-09-01T12:00:01.000Z"
+    },
+    "previousStatus": "locked",
+    "newStatus": "refunded"
+  }
+}
+```
+
+`remediation.action` is one of `mark_orphaned`, `backfill_tx_hash`,
+`requeue_release`, `refund_escrow` or `manual_review`; `remediation.status` is one
+of `remediated`, `skipped`, `failed` or `manual_review`. A remediation event is
+only emitted when the action actually succeeded — a drift that was merely
+*reported* has `kind: "drift"` and no `remediation` block.
 
 ---
 

@@ -151,6 +151,10 @@ STELLAR_COORDINATOR_SECRET=SBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 # ── Venice AI Inference ───────────────────────────────────────────────────────
 VENICE_API_KEY=your_venice_api_key_here
+# Circuit breaker: consecutive failures → open, cooldown → half-open, probe → closed.
+VENICE_CIRCUIT_FAILURE_THRESHOLD=3
+VENICE_CIRCUIT_COOLDOWN_MS=60000
+VENICE_CIRCUIT_PROBE_COUNT=1
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL=postgresql://ainet_user:SecurePassword123@localhost:5432/ainet_db
@@ -167,6 +171,16 @@ HEARTBEAT_INTERVAL_MS=300000
 HEARTBEAT_STALE_THRESHOLD_MINUTES=5
 AGENT_OFFLINE_DELETE_HOURS=24
 GRACEFUL_SHUTDOWN_TIMEOUT=30
+
+# ── Payment Drift Reconciliation ──────────────────────────────────────────────
+# On-chain/off-chain payment drift is detected and remediated every 60 s.
+RECONCILIATION_INTERVAL_MS=60000
+# Kill switch: false = detect and report only, never write to `payments`.
+RECONCILIATION_REMEDIATION_ENABLED=true
+# A still-locked escrow on a failed/cancelled task is refunded after this long.
+RECONCILIATION_ESCROW_EXPIRY_MS=86400000
+# Optional alert webhook for drift reports.
+RECONCILIATION_WEBHOOK_URL=
 ```
 
 `TRUST_PROXY` defaults to `none`, so client addresses come from the socket and
@@ -526,11 +540,40 @@ sudo systemctl start ainet-node
 * **Resolution**: Switch `STELLAR_HORIZON_URL` to a dedicated RPC provider (e.g. Blockdaemon, NowNodes) or run your own Horizon instance.
 
 ### 4. `circuit_breaker_open` (Venice AI Inference)
-* **Symptom**: Agent tasks fail immediately with `CircuitBreakerOpenError`.
-* **Cause**: Consecutive upstream timeouts or 5xx errors from Venice AI inference API.
-* **Resolution**: Verify `VENICE_API_KEY` validity. The circuit breaker automatically resets after a 60-second cooldown once upstream connectivity recovers.
+* **Symptom**: Agent tasks fail immediately with `CircuitOpenError` — no HTTP request reaches Venice AI.
+* **Cause**: `VENICE_CIRCUIT_FAILURE_THRESHOLD` consecutive upstream timeouts or 5xx errors from the Venice AI inference API tripped the breaker.
+* **Resolution**: Verify `VENICE_API_KEY` validity and upstream reachability. The breaker is fully automatic — after `VENICE_CIRCUIT_COOLDOWN_MS` (60 s) it enters `HALF_OPEN` and admits `VENICE_CIRCUIT_PROBE_COUNT` probe requests. One successful probe closes it; one failed probe re-opens it and restarts the cooldown. No operator action is required.
+* **Observability**:
+  - State gauge: `ainet_venice_circuit_breaker_state` (`0` = closed, `1` = open, `2` = half-open).
+  - JSON: `VeniceClient.getCircuitMetrics()` → `{ state, failures, successes, lastFailureAt, lastSuccessAt }`.
+  - Transitions (`opened` / `half_opened` / `closed`) are emitted on the breaker's event bus and mirrored to the log as `venice circuit transition`.
+  - While the circuit is open, cached responses are still served when `enableCacheFallback` is on (default), so a Venice outage degrades quality rather than failing every task.
+* **Tuning**: raise `VENICE_CIRCUIT_FAILURE_THRESHOLD` for a noisy upstream, or lengthen `VENICE_CIRCUIT_COOLDOWN_MS` to probe less aggressively.
 
-### 5. `Stale Agent / Heartbeat Timeout`
+### 5. `payment_drift` (Reconciliation)
+* **Symptom**: `reconcile_drift_detected_total` climbs, or the admin API reports drift awaiting review.
+* **Cause**: The local `payments` table and the Stellar chain disagree — a crash between submitting a release and writing it to the DB, a release transaction that Horizon has not indexed, or an escrow left locked on a task that failed.
+* **Detection**: The service runs every `RECONCILIATION_INTERVAL_MS` (default 60 s) and on demand via `POST /api/admin/reconciliation/run` (or `POST /api/reconciliation/run`).
+* **Automatic remediation** (only the unambiguous cases):
+  | `driftType` | Meaning | Action |
+  |---|---|---|
+  | `orphaned_locked` | DB `locked`, no claimable balance on-chain | record → `orphaned` |
+  | `missing_release_tx` | DB `released`, Horizon has no release tx | back-fill the real on-chain claim hash |
+  | `release_unconfirmed` | DB `released`, balance still claimable | re-submit the release |
+  | `expired_escrow` | Task failed/cancelled, escrow still locked past `RECONCILIATION_ESCROW_EXPIRY_MS` | refund the escrow |
+* **Manual remediation**: `missing_local` and `amount_mismatch` are always parked for a human. List and resolve them with:
+  ```bash
+  curl -H "X-Admin-API-Key: $ADMIN_API_KEY" \
+    "$BASE/api/reconciliation/drift"
+  curl -X POST -H "X-Admin-API-Key: $ADMIN_API_KEY" -H 'content-type: application/json' \
+    -d '{"status":"refunded","txHash":"<hash>","by":"ops"}' \
+    "$BASE/api/reconciliation/drift/task_123:node_risk/resolve"
+  ```
+* **Observability**: `GET /api/reconciliation/metrics` returns the counters plus a Prometheus rendering (`reconcile_drift_detected_total{type=...}`, `reconcile_remediated_total{type=...}`, `reconcile_remediation_failed_total{type=...}`, `reconcile_runs_total`). Every drift and every remediation is also published as a `ReconciliationEvent` (see `docs/EVENTS.md` §3.9).
+* **Kill switch**: set `RECONCILIATION_REMEDIATION_ENABLED=false` to keep detection and reporting while disabling every write to the payments table.
+* **Safety**: remediation is idempotent — `orphaned`/`refund` writes are compare-and-set on the source status, and a Stellar claimable balance can only be claimed once, so a re-run can never double-refund or double-release.
+
+### 6. `Stale Agent / Heartbeat Timeout`
 * **Symptom**: Agent marked `offline` in database and excluded from discovery.
 * **Cause**: Agent worker process crashed or network latency prevented sending heartbeats within `HEARTBEAT_STALE_THRESHOLD_MINUTES`.
 * **Resolution**: Check agent worker logs (`npm run logs` or `journalctl -u ainet-node`). Restart the agent worker daemon to re-register its availability.

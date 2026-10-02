@@ -123,6 +123,13 @@ export function makeMockVeniceClient(
     getModelFor: jest.fn().mockReturnValue("llama-3.3-70b"),
     getCircuitState: jest.fn().mockReturnValue("CLOSED"),
     getFailureCount: jest.fn().mockReturnValue(0),
+    getCircuitMetrics: jest.fn().mockReturnValue({
+      state: "CLOSED",
+      failures: 0,
+      successes: 0,
+      lastFailureAt: null,
+      lastSuccessAt: null,
+    }),
   };
 }
 

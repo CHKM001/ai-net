@@ -476,6 +476,149 @@ Trigger state synchronization between local database and on-chain Soroban regist
 
 ---
 
+### 3.4b Payment Drift Reconciliation (`/api/reconciliation`) — issue #496
+
+Cross-references the local `payments` table against Stellar on-chain claimable
+balances, remediates unambiguous drift, and parks the rest for a human. Runs
+every `RECONCILIATION_INTERVAL_MS` (default 60 s) and on demand.
+
+> All four routes are **admin-only** and **fail closed**: without
+> `ADMIN_API_KEY` configured they answer `503`, and without a valid
+> `X-Admin-API-Key` header they answer `401`.
+
+#### Drift taxonomy
+
+| `driftType` | Local DB | Stellar chain | Automatic action |
+|---|---|---|---|
+| `orphaned_locked` | `locked` | no claimable balance | mark the record `orphaned` |
+| `missing_release_tx` | `released` | release tx absent from Horizon | back-fill the real claim hash |
+| `release_unconfirmed` | `released` | balance still claimable | re-submit the release |
+| `expired_escrow` | `locked`, task terminal | balance still claimable | refund the escrow |
+| `missing_local` | no record | claimable balance | parked (manual) |
+| `amount_mismatch` | any | amount differs | parked (manual) |
+
+Remediation is idempotent: re-running never double-refunds or double-releases.
+
+#### `POST /api/reconciliation/run`
+Run one reconciliation pass (and remediate). Body is optional.
+
+* **Request**:
+  ```bash
+  curl -s -X POST http://localhost:3000/api/reconciliation/run \
+    -H "X-Admin-API-Key: $ADMIN_API_KEY" \
+    -H 'content-type: application/json' \
+    -d '{"triggeredBy":"manual"}'
+  ```
+
+* **Response (`200 OK`)** — abridged:
+  ```json
+  {
+    "id": "0f3c1c9e-2a51-4d1a-9f4e-0d2b1f2a3c4d",
+    "runAt": "2026-09-01T12:00:00.000Z",
+    "triggeredBy": "manual",
+    "status": "discrepancies_found",
+    "summary": {
+      "totalLocalRecords": 128,
+      "totalOnChainBalances": 96,
+      "matched": 95,
+      "discrepancies": 1,
+      "driftByType": {
+        "orphaned_locked": 1, "missing_release_tx": 0,
+        "release_unconfirmed": 0, "expired_escrow": 0,
+        "missing_local": 0, "amount_mismatch": 0
+      },
+      "remediated": 1,
+      "pendingRemediation": 0,
+      "releaseVerified": 42,
+      "releaseUnverified": 0
+    },
+    "discrepancies": [
+      {
+        "type": "missing_on_chain",
+        "driftType": "orphaned_locked",
+        "balanceId": "00000000abc123...",
+        "taskId": "task_ab12cd34ef56",
+        "nodeId": "node_risk",
+        "severity": "critical",
+        "description": "Local payment record ... has no matching on-chain claimable balance",
+        "localAmountStroops": "10000000",
+        "remediation": {
+          "action": "mark_orphaned",
+          "status": "remediated",
+          "txHash": "reconciled-repair",
+          "at": "2026-09-01T12:00:00.000Z"
+        }
+      }
+    ]
+  }
+  ```
+
+#### `GET /api/reconciliation/report`
+The most recent report. `404` when no run has completed yet.
+
+#### `GET /api/reconciliation/drift`
+Drift awaiting a human decision, newest first. Records survive restarts and are
+pruned automatically once they stop reproducing.
+
+* **Query**: `includeAcknowledged=true` to include resolved entries.
+* **Response (`200 OK`)**:
+  ```json
+  {
+    "drift": [
+      {
+        "id": "task_ab12cd34ef56:node_risk",
+        "driftType": "expired_escrow",
+        "balanceId": "00000000abc123...",
+        "taskId": "task_ab12cd34ef56",
+        "nodeId": "node_risk",
+        "severity": "warning",
+        "recommendedAction": "refund_escrow",
+        "detectedAt": "2026-09-01T12:00:00.000Z",
+        "lastSeenAt": "2026-09-01T12:01:00.000Z",
+        "occurrences": 3,
+        "acknowledged": false
+      }
+    ]
+  }
+  ```
+
+#### `POST /api/reconciliation/drift/{id}/resolve`
+Mark a drift handled and patch the payments row in the same step, so the next
+run is a no-op.
+
+* **Request**:
+  ```bash
+  curl -s -X POST http://localhost:3000/api/reconciliation/drift/task_ab12cd34ef56:node_risk/resolve \
+    -H "X-Admin-API-Key: $ADMIN_API_KEY" \
+    -H 'content-type: application/json' \
+    -d '{"status":"refunded","txHash":"<tx_hash>","by":"ops"}'
+  ```
+* **Response (`200 OK`)**: the resolved drift record, with `acknowledged: true`
+  and a `resolution` block. `404` when no drift with that id is queued.
+
+#### `GET /api/reconciliation/metrics`
+Drift and remediation counters, plus the same values in Prometheus text format.
+
+* **Response (`200 OK`)**:
+  ```json
+  {
+    "driftDetected": { "orphaned_locked": 5, "expired_escrow": 1, "...": 0 },
+    "remediated":    { "orphaned_locked": 5, "expired_escrow": 0, "...": 0 },
+    "remediationFailed": { "...": 0 },
+    "runs": 42,
+    "runsWithDrift": 3,
+    "runsWithRemediation": 2,
+    "prometheus": "# HELP reconcile_drift_detected_total ..."
+  }
+  ```
+
+> **Operational signal:** the gap between `driftDetected` and `remediated` is
+> what matters. A growing gap means drift is being detected but not acted upon.
+> Set `RECONCILIATION_REMEDIATION_ENABLED=false` to keep detection and reporting
+> while disabling every write to the payments table.
+
+---
+
 ### 3.5 Admin Maintenance (`/api/v1/admin`)
 
 #### `POST /api/v1/admin/cache/clear`
