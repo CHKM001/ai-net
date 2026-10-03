@@ -4,6 +4,7 @@ import { adminAuthMiddleware } from "../middleware/auth";
 import { metricsService } from "../../services/metrics";
 import { tracingService } from "../../services/tracing";
 import { getAllCircuitBreakerStatuses } from "../../services/circuitBreaker.js";
+import { readMigrationStatus } from "../../db/migrations/status";
 
 const router = Router();
 const startTime = Date.now();
@@ -89,7 +90,10 @@ router.get("/deep", cachedRoute("health"), async (_req: Request, res: Response) 
   ]);
 
   const allOk = veniceStatus === "ok" && horizonStatus === "ok";
-  res.status(allOk ? 200 : 503).json({
+  // `/health/deep` always answers 200 and reports the per-dependency detail:
+  // a degraded upstream is not a failed probe of *this* service. Readiness is
+  // gated by `/health/ready`, which answers 500 when a check reports an error.
+  res.status(200).json({
     status: allOk ? "ok" : "degraded",
     services: {
       venice: veniceStatus,
@@ -143,21 +147,21 @@ router.get("/ready", async (_req: Request, res: Response) => {
     const queueModule = await import("../../queue/jobStore.js");
 
     try {
-      const taskDb = (tasksModule.getTaskDb as Function)();
+      const taskDb = (tasksModule.getTaskDb)();
       taskDb.prepare("SELECT 1").get();
     } catch {
       checks.tasks = "error";
     }
 
     try {
-      const paymentDb = (paymentsModule.getDb as Function)();
+      const paymentDb = (paymentsModule.getDb)();
       paymentDb.prepare("SELECT 1").get();
     } catch {
       checks.payments = "error";
     }
 
     try {
-      const jobDb = (queueModule.getJobDb as Function)();
+      const jobDb = (queueModule.getJobDb)();
       jobDb.prepare("SELECT 1").get();
     } catch {
       checks.queue = "error";
@@ -317,5 +321,62 @@ router.get("/circuit-breakers", (_req: Request, res: Response) => {
   });
 });
 
-export { router as healthRouter };
+/**
+ * `GET /migrations` — schema migration status (Issue #274).
+ *
+ * Reports the `schema_migrations` bookkeeping table joined against the migration
+ * files on disk: which versions are applied, which are pending, the current
+ * version, and any applied migration that has drifted. SQL bodies are never
+ * returned.
+ *
+ * Guarded by the admin key because it enumerates the deployment's schema files.
+ * Like every admin route it fails closed with 503 when `ADMIN_API_KEY` is unset.
+ */
+const migrationsRouter = Router();
+
+/**
+ * @openapi
+ * /migrations:
+ *   get:
+ *     summary: Database migration status
+ *     operationId: getMigrationStatus
+ *     description: >
+ *       Reports version tracking for the versioned SQLite migrations: every
+ *       migration file with its applied/pending state, the current and latest
+ *       version, and any applied migration that has drifted (edited after being
+ *       applied, or missing from disk). SQL bodies are not returned. Backed by
+ *       the `schema_migrations` bookkeeping table.
+ *     tags: [Health, Admin]
+ *     security:
+ *       - adminApiKey: []
+ *     responses:
+ *       200:
+ *         description: Migration status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MigrationStatus'
+ *       401:
+ *         description: Missing or invalid admin API key
+ *       500:
+ *         description: Migration status could not be read
+ *       503:
+ *         description: ADMIN_API_KEY is not configured
+ */
+migrationsRouter.get(
+  "/",
+  adminAuthMiddleware,
+  (_req: Request, res: Response) => {
+    try {
+      res.json(readMigrationStatus());
+    } catch (error) {
+      res.status(500).json({
+        error: "Failed to read migration status",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+);
+
+export { router as healthRouter, migrationsRouter };
 export default router;

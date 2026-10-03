@@ -57,7 +57,7 @@ export function createRateLimitRouter(): Router {
       const status = await limiter.getStatus(key, rule);
 
       if (!status) {
-        throw new NotFoundError("Rate limit key", key, correlationId);
+        throw new NotFoundError("Rate limit key", key, undefined, correlationId);
       }
 
       res.json({

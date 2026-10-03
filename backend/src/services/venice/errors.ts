@@ -1,10 +1,12 @@
-export class CircuitOpenError extends Error {
-  constructor(message = 'Circuit breaker is OPEN — Venice requests are blocked') {
-    super(message);
-    this.name = 'CircuitOpenError';
-  }
-}
+/**
+ * The breaker throws the shared `CircuitOpenError` defined next to the breaker
+ * itself. Re-exporting it here keeps a single source of truth — Venice modules
+ * and `BaseAgent` all run `instanceof CircuitOpenError` against the error the
+ * breaker actually throws.
+ */
+export { CircuitOpenError } from '../circuitBreaker.js';
 
+/** Thrown when a request asks for more tokens than the hard cap allows. */
 export class TokenBudgetExceededError extends Error {
   constructor(requested: number, cap: number) {
     super(`Token budget exceeded: requested ${requested}, hard cap is ${cap}`);

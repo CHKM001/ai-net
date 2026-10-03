@@ -2,8 +2,9 @@ import type { Request, Response, NextFunction } from "express";
 import { createLogger } from "../../utils/logger";
 import { AppError } from "../../errors";
 import { getConfig } from "../../config";
-import { HTTP_STATUS_FOR_CODE } from "../../errors/ErrorCode";
+import { HTTP_STATUS_FOR_CODE, type ErrorCode } from "../../errors/ErrorCode";
 
+const isProduction = process.env.NODE_ENV === "production";
 
 /**
  * Build the canonical error envelope for every API response.
@@ -16,7 +17,9 @@ function buildErrorEnvelope({
   statusCode,
   path,
   correlationId,
+  requestId,
   details,
+  stack,
   includeTimestamp = true,
 }: {
   code: string;
@@ -24,7 +27,11 @@ function buildErrorEnvelope({
   statusCode: number;
   path: string;
   correlationId: string;
+  /** Per-request id, when the request middleware assigned one. */
+  requestId?: string;
   details?: unknown;
+  /** Development-only stack trace, surfaced at `error.stack`. */
+  stack?: string;
   includeTimestamp?: boolean;
 }): Record<string, unknown> {
   const envelope: Record<string, unknown> = {
@@ -36,12 +43,18 @@ function buildErrorEnvelope({
     },
   };
 
+  const error = envelope.error as Record<string, unknown>;
+
   if (details !== undefined) {
-    (envelope.error as Record<string, unknown>).details = details;
+    error.details = details;
+  }
+
+  if (stack !== undefined) {
+    error.stack = stack;
   }
 
   if (includeTimestamp) {
-    (envelope.error as Record<string, unknown>).timestamp = new Date().toISOString();
+    error.timestamp = new Date().toISOString();
   }
 
   // Legacy top-level fields kept for backward compatibility with older clients/tests
@@ -49,7 +62,8 @@ function buildErrorEnvelope({
     ...envelope,
     statusCode,
     path,
-    requestId: correlationId,
+    requestId: requestId ?? correlationId,
+    message,
   };
 }
 
@@ -61,7 +75,7 @@ function resolveStatusCode(err: unknown): number {
   return (
     (err as any)?.statusCode ??
     (err as any)?.status ??
-    HTTP_STATUS_FOR_CODE[(err as any)?.code] ??
+    HTTP_STATUS_FOR_CODE[(err as any)?.code as ErrorCode] ??
     500
   );
 }
@@ -138,7 +152,10 @@ export function errorHandler(
       statusCode: err.statusCode,
       path,
       correlationId,
-      details: err.details,
+      requestId,
+      // Structured details are a debugging aid: production responses keep the
+      // code/message contract and nothing else.
+      details: isProduction ? undefined : err.details,
     });
 
     res.status(err.statusCode).json(body);
@@ -163,11 +180,8 @@ export function errorHandler(
     "unhandled error",
   );
 
-  const isProd = getConfig().NODE_ENV === "production";
-  const isDev = getConfig().NODE_ENV === "development";
-
-  const message = isProd
-    ? "Internal server error"
+  const message = isProduction
+    ? "An unexpected error occurred. Please try again later."
     : err instanceof Error
       ? err.message || "Internal server error"
       : "An unexpected error occurred";
@@ -178,7 +192,8 @@ export function errorHandler(
     statusCode,
     path,
     correlationId,
-    details: isDev && err instanceof Error ? { stack: err.stack } : undefined,
+    requestId,
+    stack: isDevelopment && err instanceof Error ? err.stack : undefined,
   });
 
   res.status(statusCode).json(body);

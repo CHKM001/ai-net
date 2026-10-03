@@ -72,6 +72,17 @@ export interface AgentAlertRow {
 let _agentPool: SqlitePool | null = null;
 let _agentPoolClosing: Promise<void> | null = null;
 
+/**
+ * Memoised `AgentDb` wrappers, keyed by the underlying SQLite handle.
+ *
+ * `createAgentDb` is called from request handlers (and from background
+ * services) with the pool's writer handle, so without this cache every call
+ * would rebuild the wrapper's closure graph. Keying on the handle keeps the
+ * cache correct when the pool is closed and reopened: a new writer is a new
+ * key, and the stale entry becomes unreachable.
+ */
+const _agentDbCache = new WeakMap<Database.Database, AgentDb>();
+
 export function ensureAgentTable(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS agents (
@@ -137,8 +148,14 @@ export function getAgentPool(dbPath?: string): SqlitePool {
       min: 1,
       max: 4,
       acquireTimeoutMs: 5_000,
+      // Schema setup runs exactly once per pool here, on the writer, before
+      // any reader attaches to the file. It deliberately does not live in
+      // `createAgentDb`: that is a per-request mapping, and running DDL there
+      // meant every agents request opened a write transaction and took the
+      // write lock just to re-discover a schema that already existed.
       onCreate: (db) => {
         migrateToLatest(db, MIGRATIONS_DIR);
+        ensureAgentTable(db);
       },
     });
   }
@@ -237,9 +254,22 @@ export interface AgentDb {
   resolveError?(errorId: string, resolution: string): void;
 }
 
+/**
+ * Map an already-initialised SQLite handle onto the `AgentDb` API.
+ *
+ * Pure mapping: no DDL, no other side effects. The agents schema is created
+ * once by `getAgentPool`'s `onCreate` hook when the handle is first opened.
+ *
+ * The result is memoised per handle, so repeated calls return the *same*
+ * object reference rather than a structurally identical copy — callers such as
+ * the agents route's `createAgentDb(getAgentDb())` pay a map lookup instead of
+ * rebuilding the wrapper and discarding its prepared-statement cache.
+ */
 export function createAgentDb(db: Database.Database): AgentDb {
-  ensureAgentTable(db);
-  return {
+  const cached = _agentDbCache.get(db);
+  if (cached) return cached;
+
+  const agentDb: AgentDb = {
     upsert(agent: AgentRecord): void {
       const rep = agent.reputationScore !== undefined ? Math.max(0.0, Math.min(5.0, agent.reputationScore)) : 2.5;
       db.prepare(`
@@ -587,4 +617,7 @@ export function createAgentDb(db: Database.Database): AgentDb {
       store.resolve(errorId, resolution);
     }
   };
+
+  _agentDbCache.set(db, agentDb);
+  return agentDb;
 }

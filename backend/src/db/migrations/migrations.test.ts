@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
 import pino from "pino";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { isInMemoryPath, openDatabase, resolveDatabasePath } from "../index";
+import { loadConfig } from "../../config";
 import {
   MigrationLoadError,
   loadMigrations,
@@ -18,6 +19,9 @@ import {
   type MigrationResult,
 } from "./runner";
 import { parseCliArgs, runMigrateCli } from "./cli";
+import { MigrationTracker, describeMigrationStatus } from "./tracker";
+import { runStartupMigrations } from "./startup";
+import { readMigrationStatus } from "./status";
 
 const silentLogger = pino({ enabled: false });
 
@@ -43,6 +47,13 @@ function appliedIds(db: Database.Database): string[] {
   return (
     db.prepare("SELECT id FROM schema_migrations ORDER BY id ASC").all() as Array<{ id: string }>
   ).map((row) => row.id);
+}
+
+/** Write named migration files into `dir`, preserving the caller's filenames. */
+function writeMigrationFiles(dir: string, files: Record<string, string>): void {
+  for (const [filename, sql] of Object.entries(files)) {
+    writeFileSync(join(dir, filename), sql);
+  }
 }
 
 describe("loadMigrations", () => {
@@ -524,7 +535,20 @@ describe("resolveDatabasePath", () => {
   it("falls back to ./data/ai-net.db", () => {
     delete process.env.DB_PATH;
     delete process.env.DATABASE_URL;
-    expect(resolveDatabasePath()).toBe(join(process.cwd(), "data", "ai-net.db"));
+
+    // Under NODE_ENV=test `withRuntimeDefaults()` pins DATABASE_URL to an
+    // in-memory database so no test ever touches the developer's data
+    // directory, which is the first thing `resolveDatabasePath()` sees.
+    expect(resolveDatabasePath()).toBe(":memory:");
+
+    // The filesystem fallback is still the shipping default and stays
+    // reachable from any non-test environment.
+    const config = loadConfig({
+      NODE_ENV: "production",
+      VENICE_API_KEY: "venice-local-dev-key-0123456789abcdef",
+      AUTH_JWT_SECRET: "ai-net-migrations-suite-jwt-secret-0123456789",
+    });
+    expect(config.DATABASE_URL).toBe("./data/ai-net.db");
   });
 
   it("strips a file: prefix and leaves memory URIs alone", () => {
@@ -718,5 +742,288 @@ describe("npm script", () => {
 
   it("exposes db:migrate", () => {
     expect(pkg.scripts["db:migrate"]).toBe("ts-node src/db/cli.ts migrate");
+  });
+});
+
+describe("MigrationTracker", () => {
+  let db: Database.Database;
+  let dir: string;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    dir = mkdtempSync(join(tmpdir(), "ainet-tracker-"));
+    writeMigrationFiles(dir, {
+      "0001_init.sql": "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);",
+      "0002_more.sql":
+        "CREATE TABLE IF NOT EXISTS b (id TEXT PRIMARY KEY);\n-- migrate:down\nDROP TABLE IF EXISTS b;",
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates the bookkeeping table on demand and is safe to repeat", () => {
+    const tracker = new MigrationTracker(db);
+    tracker.ensureTable();
+    tracker.ensureTable();
+
+    expect(tableNames(db)).toContain("schema_migrations");
+  });
+
+  it("records every version-tracked field and reads it back", () => {
+    const migration = loadMigrations(dir)[0];
+    const tracker = new MigrationTracker(db);
+    tracker.record(migration, "2026-01-01T00:00:00.000Z");
+
+    const records = tracker.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual({
+      id: "0001",
+      filename: "0001_init.sql",
+      name: "init",
+      checksum: migration.checksum,
+      sql: migration.upSql,
+      downSql: null,
+      appliedAt: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
+  it("stores the down SQL so a revert knows what to run", () => {
+    const tracker = new MigrationTracker(db);
+    const migrations = loadMigrations(dir);
+    tracker.record(migrations[1]);
+
+    expect(tracker.list()[0].downSql).toBe("DROP TABLE IF EXISTS b;");
+  });
+
+  it("answers membership, latest version, and forgets reverted rows", () => {
+    const tracker = new MigrationTracker(db);
+    const migrations = loadMigrations(dir);
+
+    expect(tracker.isApplied("0001")).toBe(false);
+    expect(tracker.latestVersion()).toBeNull();
+
+    tracker.record(migrations[0]);
+    tracker.record(migrations[1]);
+    expect(tracker.isApplied("0001")).toBe(true);
+    expect(tracker.latestVersion()).toBe("0002");
+    expect([...tracker.map().keys()]).toEqual(["0001", "0002"]);
+
+    tracker.forget("0002");
+    expect(tracker.isApplied("0002")).toBe(false);
+    expect(tracker.latestVersion()).toBe("0001");
+  });
+
+  it("refuses to record the same version twice, so a migration cannot be re-applied", () => {
+    const tracker = new MigrationTracker(db);
+    const migration = loadMigrations(dir)[0];
+    tracker.record(migration);
+
+    expect(() => tracker.record(migration)).toThrow();
+  });
+});
+
+describe("describeMigrationStatus", () => {
+  let db: Database.Database;
+  let dir: string;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    dir = mkdtempSync(join(tmpdir(), "ainet-status-"));
+    writeMigrationFiles(dir, {
+      "0001_init.sql":
+        "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);\n-- migrate:down\nDROP TABLE IF EXISTS a;",
+      "0002_more.sql": "CREATE TABLE IF NOT EXISTS b (id TEXT PRIMARY KEY);",
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const report = () => describeMigrationStatus(new MigrationTracker(db), loadMigrations(dir));
+
+  it("reports every migration as pending for a database that never migrated", () => {
+    const status = report();
+
+    expect(status.currentVersion).toBeNull();
+    expect(status.latestVersion).toBe("0002");
+    expect(status.appliedCount).toBe(0);
+    expect(status.pendingCount).toBe(2);
+    expect(status.upToDate).toBe(false);
+    expect(status.drift).toEqual([]);
+    expect(status.migrations.map((m) => m.state)).toEqual(["pending", "pending"]);
+    expect(status.migrations.every((m) => m.appliedAt === null)).toBe(true);
+  });
+
+  it("reports applied state and reversibility once the runner has run", () => {
+    new MigrationRunner(db, loadMigrations(dir), { logger: silentLogger }).up();
+
+    const status = report();
+    expect(status.currentVersion).toBe("0002");
+    expect(status.appliedCount).toBe(2);
+    expect(status.pendingCount).toBe(0);
+    expect(status.upToDate).toBe(true);
+    expect(status.migrations.map((m) => m.state)).toEqual(["applied", "applied"]);
+    // 0001 defines a down section, 0002 is forward-only.
+    expect(status.migrations.map((m) => m.reversible)).toEqual([true, false]);
+    expect(status.migrations.every((m) => typeof m.appliedAt === "string")).toBe(true);
+  });
+
+  it("flags an applied migration that was edited after it was applied", () => {
+    new MigrationRunner(db, loadMigrations(dir), { logger: silentLogger }).up();
+
+    writeMigrationFiles(dir, {
+      "0001_init.sql":
+        "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);\n-- migrate:down\nDROP TABLE IF EXISTS a;\n-- edited\n",
+    });
+
+    const status = report();
+    expect(status.drift).toEqual(["0001"]);
+    expect(status.migrations[0].drifted).toBe(true);
+    expect(status.migrations[1].drifted).toBe(false);
+    expect(status.upToDate).toBe(false);
+  });
+
+  it("flags an applied migration whose file is missing from disk", () => {
+    new MigrationRunner(db, loadMigrations(dir), { logger: silentLogger }).up();
+    rmSync(join(dir, "0002_more.sql"));
+
+    const status = report();
+    expect(status.drift).toEqual(["0002"]);
+    expect(status.upToDate).toBe(false);
+    // The row survives even though the file is gone, so counts stay honest.
+    expect(status.appliedCount).toBe(2);
+    expect(status.migrations.map((m) => m.id)).toEqual(["0001"]);
+  });
+});
+
+describe("runStartupMigrations", () => {
+  let dir: string;
+  let migrationsDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ainet-startup-"));
+    migrationsDir = join(dir, "migrations");
+    mkdirSync(migrationsDir);
+    dbPath = join(dir, "ainet.db");
+    writeMigrationFiles(migrationsDir, {
+      "0001_init.sql": "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);",
+      "0002_more.sql": "CREATE TABLE IF NOT EXISTS b (id TEXT PRIMARY KEY);",
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const run = () =>
+    runStartupMigrations({ dbPath, migrationsDir, logger: silentLogger });
+
+  it("creates the database and applies every pending migration on first run", () => {
+    expect(existsSync(dbPath)).toBe(false);
+
+    const summary = run();
+    expect(summary.changed).toBe(true);
+    expect(summary.currentVersion).toBe("0002");
+    expect(summary.applied.map((r) => r.filename)).toEqual(["0001_init.sql", "0002_more.sql"]);
+    expect(summary.database).toBe(dbPath);
+    expect(existsSync(dbPath)).toBe(true);
+  });
+
+  it("is a no-op on a second startup, leaving the schema untouched", () => {
+    run();
+
+    const summary = run();
+    expect(summary.changed).toBe(false);
+    expect(summary.applied).toEqual([]);
+    expect(summary.currentVersion).toBe("0002");
+  });
+
+  it("throws and aborts startup when a migration fails, keeping earlier work", () => {
+    writeMigrationFiles(migrationsDir, {
+      "0001_init.sql": "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);",
+      "0002_broken.sql": "INSERT INTO missing_table VALUES (1);",
+      "0003_after.sql": "CREATE TABLE IF NOT EXISTS c (id TEXT PRIMARY KEY);",
+    });
+
+    expect(() => run()).toThrow(MigrationFailedError);
+
+    const db = new Database(dbPath);
+    expect(appliedIds(db)).toEqual(["0001"]);
+    db.close();
+  });
+
+  it("refuses to start against a database whose applied migration drifted", () => {
+    run();
+
+    writeMigrationFiles(migrationsDir, {
+      "0001_init.sql": "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY); -- edited\n",
+    });
+
+    expect(() => run()).toThrow(MigrationChecksumError);
+  });
+});
+
+describe("readMigrationStatus", () => {
+  let dir: string;
+  let migrationsDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ainet-readstatus-"));
+    migrationsDir = join(dir, "migrations");
+    mkdirSync(migrationsDir);
+    dbPath = join(dir, "ainet.db");
+    writeMigrationFiles(migrationsDir, {
+      "0001_init.sql": "CREATE TABLE IF NOT EXISTS a (id TEXT PRIMARY KEY);",
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const read = () => readMigrationStatus({ dbPath, migrationsDir });
+
+  it("reports the pending migrations of a database that has not been migrated", () => {
+    const status = read();
+
+    expect(status.database).toBe(dbPath);
+    expect(status.migrationsDir).toBe(migrationsDir);
+    expect(status.migrationCount).toBe(1);
+    expect(status.pendingCount).toBe(1);
+    expect(status.currentVersion).toBeNull();
+    expect(status.upToDate).toBe(false);
+  });
+
+  it("reports up to date after startup migrations have run", () => {
+    runStartupMigrations({ dbPath, migrationsDir, logger: silentLogger });
+
+    const status = read();
+    expect(status.upToDate).toBe(true);
+    expect(status.currentVersion).toBe("0001");
+    expect(status.migrations).toHaveLength(1);
+    expect(status.migrations[0].state).toBe("applied");
+  });
+
+  it("never returns SQL bodies", () => {
+    const status = read();
+    expect(JSON.stringify(status)).not.toContain("CREATE TABLE");
+  });
+
+  it("throws when a migration filename in the directory is malformed", () => {
+    writeFileSync(join(migrationsDir, "not-a-migration.sql"), "SELECT 1;");
+    expect(() => read()).toThrow(MigrationLoadError);
+  });
+
+  it("throws when the configured database URL is not SQLite", () => {
+    expect(() => readMigrationStatus({ dbPath: "postgresql://user:pw@localhost:5432/ainet" })).toThrow(
+      /Unsupported database URL/,
+    );
   });
 });

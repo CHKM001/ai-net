@@ -259,7 +259,7 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
   router.post("/agents/:id/enable", (req: Request, res: Response, next: NextFunction) => {
     const agent = setAgentEnabled(req.params.id, true);
     if (!agent) {
-      next(new NotFoundError("Agent", req.params.id, res.locals.correlationId as string | undefined));
+      next(new NotFoundError("Agent", req.params.id, undefined, res.locals.correlationId as string | undefined));
       return;
     }
     res.json({ enabled: true, agent });
@@ -298,7 +298,7 @@ export function createAdminRouter(options: AdminRouterOptions = {}): Router {
   router.post("/agents/:id/disable", (req: Request, res: Response, next: NextFunction) => {
     const agent = setAgentEnabled(req.params.id, false);
     if (!agent) {
-      next(new NotFoundError("Agent", req.params.id, res.locals.correlationId as string | undefined));
+      next(new NotFoundError("Agent", req.params.id, undefined, res.locals.correlationId as string | undefined));
       return;
     }
     res.json({ enabled: false, agent });

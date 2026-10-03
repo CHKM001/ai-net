@@ -45,18 +45,9 @@ export const taskPrioritySchema = z.enum(["low", "normal", "high", "critical"]);
 export const promptSchema = z
   .string()
   .min(1, "Prompt is required")
-  .superRefine((val, ctx) => {
-    const max = getMaxPromptLength();
-    if (val.length > max) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.too_big,
-        maximum: max,
-        type: "string",
-        inclusive: true,
-        message: `Prompt too long (max ${max} characters)`,
-      });
-    }
-  })
+  .max(MAX_PROMPT_LENGTH, `Prompt too long (max ${MAX_PROMPT_LENGTH} characters)`)
+  // Sanitising control characters is the point of this expression.
+  // eslint-disable-next-line no-control-regex
   .transform((s) => s.replace(/[\x00-\x08\x0E-\x1F]/g, "").trim());
 
 /**

@@ -14,6 +14,7 @@
     "test:coverage": "jest --coverage --runInBand --forceExit",
     "test:e2e": "jest --config ../tests/e2e/jest.config.js --runInBand --forceExit",
     "test:performance": "ts-node tests/performance/run.ts",
+    "validate:env": "ts-node --transpile-only scripts/validate-env-example.ts",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
     "db:migrate": "ts-node src/db/migrations/cli.ts",
@@ -26,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@stellar/stellar-sdk": "12.3.0",
-    "better-sqlite3": "9.6.0",
+    "better-sqlite3": "^13.0.3",
     "compression": "1.7.5",
     "cors": "^2.8.5",
     "express": "^4.18.2",
@@ -62,8 +63,5 @@
     "ts-jest": "29.1.4",
     "ts-node": "10.9.2",
     "typescript": "^5.4.5"
-  },
-  "allowScripts": {
-    "better-sqlite3@9.6.0": true
   }
 }

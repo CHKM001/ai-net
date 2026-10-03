@@ -58,6 +58,17 @@ export interface JobStore {
   findById(id: string): Job | undefined;
   findByTaskId(taskId: string): Job | undefined;
   /**
+   * Returns `true` when an active, pending or failed-but-retriable job for
+   * `taskId` already exists in the store.  Used by the deduplication gate in
+   * {@link JobQueue.enqueueUnique} to prevent the same task from being queued
+   * twice while it is still in-flight or awaiting its first run.
+   *
+   * Terminal states (`completed`, `dead-letter`) are intentionally excluded:
+   * a task that has fully finished — whether successfully or permanently — can
+   * legitimately be re-submitted.
+   */
+  hasPendingJobForTask(taskId: string): boolean;
+  /**
    * Read-only inspection of the next runnable job. This does **not** claim it:
    * two callers can be handed the same row. Use {@link JobStore.claimNextPendingJob}
    * to take ownership of a job.
@@ -356,6 +367,20 @@ export function createJobStore(db: Database.Database): JobStore {
         .get(taskId);
       if (!row) return undefined;
       return mapRowToJob(row);
+    },
+
+    hasPendingJobForTask(taskId: string): boolean {
+      // Only non-terminal statuses are checked. `completed` and `dead-letter`
+      // are terminal — a finished task may be re-submitted.
+      const row = db
+        .prepare(`
+          SELECT id FROM jobs
+          WHERE taskId = ?
+            AND status IN ('pending', 'active', 'failed')
+          LIMIT 1
+        `)
+        .get(taskId);
+      return row !== undefined;
     },
 
     getNextPendingJob(nowIso?: string): Job | undefined {

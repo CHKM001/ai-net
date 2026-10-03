@@ -466,7 +466,7 @@ let _defaultStore: IdempotencyStore | null = null;
  * The store is lazily initialised on first call.
  */
 export function getDefaultIdempotencyStore(
-  config?: Pick<
+  configOverride?: Pick<
     Config,
     | 'NODE_ENV'
     | 'IDEMPOTENCY_TTL_MS'

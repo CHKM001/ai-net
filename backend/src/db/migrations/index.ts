@@ -23,19 +23,38 @@ export {
 } from "./loader";
 
 export {
+  MigrationTracker,
+  SCHEMA_MIGRATIONS_DDL,
+  describeMigrationStatus,
+  type AppliedMigration,
+  type MigrationRecord,
+  type MigrationStatusEntry,
+  type MigrationStatusReport,
+} from "./tracker";
+
+export {
   MigrationChecksumError,
   MigrationError,
   MigrationFailedError,
   MigrationRunner,
-  SCHEMA_MIGRATIONS_DDL,
-  type AppliedMigration,
   type MigrationDirection,
-  type MigrationRecord,
   type MigrationResult,
   type MigrationRunnerOptions,
   type MigrationStatus,
   type DownOptions,
   type UpOptions,
 } from "./runner";
+
+export {
+  runStartupMigrations,
+  type StartupMigrationOptions,
+  type StartupMigrationSummary,
+} from "./startup";
+
+export {
+  readMigrationStatus,
+  type MigrationStatusOptions,
+  type MigrationStatusResult,
+} from "./status";
 
 export { runMigrateCli } from "./cli";

@@ -16,12 +16,13 @@ import { closeErrorDb } from "./db/errorRegistry";
 import { closeTaskDb, getTaskDb, createTaskDb } from "./db/tasks";
 import { closeJobDb } from "./queue";
 import { closeEventStore, getEventStore } from "./events/eventStore";
-import { createDefaultReconciliationService } from "./services/reconciliation";
+import { createDefaultReconciliationService, closeReconciliationDb } from "./services/reconciliation";
 import { DbMaintenanceService, defaultMaintenanceDatabases } from "./services/dbMaintenance";
 import { ErrorRegistryMaintenanceService } from "./services/errorRegistryMaintenance";
 import { EventRetentionService } from "./services/eventRetention";
 import { createLogger } from "./utils/logger";
 import { redactedConfigSnapshot } from "./config";
+import { runStartupMigrations } from "./db/migrations/startup";
 import { getDefaultIdempotencyStore, resetDefaultIdempotencyStore } from "./services/idempotency";
 
 async function main() {
@@ -31,6 +32,25 @@ async function main() {
     // ── Validate env config at startup ──────────────────────────────────────────
     const config = loadConfig();
     logger.info({ config: redactedConfigSnapshot(config) }, "starting server");
+
+    // ── Bring the schema up to date (Issue #274) ────────────────────────────────
+    // Runs before anything opens a database or accepts a request, so the process
+    // never serves traffic against a schema it is out of step with. A failing or
+    // drifted migration throws and aborts startup below. Set AUTO_MIGRATE=false to
+    // run the schema as an explicit `npm run db:migrate` deploy step instead.
+    if (config.AUTO_MIGRATE) {
+      const migrations = runStartupMigrations();
+      logger.info(
+        {
+          database: migrations.database,
+          currentVersion: migrations.currentVersion,
+          changed: migrations.changed,
+        },
+        "database schema ready",
+      );
+    } else {
+      logger.info("AUTO_MIGRATE is disabled — skipping startup database migrations");
+    }
 
     // Start agent sync
     startAgentSync();
@@ -43,9 +63,12 @@ async function main() {
     const cleanupService = new AgentCleanupService();
     cleanupService.start();
 
-    // Start daily payment reconciliation
+    // Start payment reconciliation. Issue #496 raises the default cadence from
+    // once a day to every RECONCILIATION_INTERVAL_MS (60 s) so on-chain/off-chain
+    // payment drift is detected and remediated within a minute rather than being
+    // found at the end of the day.
     const reconciliationService = createDefaultReconciliationService();
-    reconciliationService.startDaily(config.RECONCILIATION_INTERVAL_MS);
+    reconciliationService.start(config.RECONCILIATION_INTERVAL_MS);
 
     // Start idempotency key cleanup so the idempotency_keys table stays
     // bounded in production (Issue #657).  The store is initialised here with
@@ -120,7 +143,6 @@ export interface GracefulShutdownExtras {
   globalAgentRegistry?: { shutdown(): void };
   idempotencyStore?: { stopCleanup(): void; close(): void };
 }
-
 /**
  * SIGTERM/SIGINT handler: stop accepting new work, drain in-flight jobs and
  * the WebSocket stream, flush the event store, close every database

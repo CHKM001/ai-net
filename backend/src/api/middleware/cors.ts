@@ -23,6 +23,7 @@
  */
 
 import cors from 'cors';
+import type { NextFunction, Request, Response } from 'express';
 import { allowedOrigins } from '../../config';
 import { ForbiddenError } from '../../errors/ForbiddenError';
 import { createLogger } from '../../utils/logger';
@@ -205,11 +206,7 @@ export function createCorsMiddleware(app?: unknown) {
 
   // Ensure `Vary: Origin` is present on every path — including rejections —
   // so a cached rejection is never served to a legitimate origin.
-  return (
-    req: Parameters<typeof corsHandler>[0],
-    res: Parameters<typeof corsHandler>[1],
-    next: Parameters<typeof corsHandler>[2],
-  ): void => {
+  return (req: Request, res: Response, next: NextFunction): void => {
     const existing = res.getHeader('Vary');
     if (!existing) {
       res.setHeader('Vary', 'Origin');

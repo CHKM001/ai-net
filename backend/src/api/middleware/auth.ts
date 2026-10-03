@@ -1,9 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
 import { getConfig } from '../../config/index';
 import { getAuthService } from '../../services/auth';
+import { UnauthorizedError } from '../../errors';
 import type { AccessTokenPayload } from '../../services/auth/tokenService';
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace -- Express type augmentation
   namespace Express {
     interface Request {
       user?: AccessTokenPayload;
@@ -12,7 +14,9 @@ declare global {
 }
 
 function loadKeys(): Set<string> | null {
-  const raw = getConfig().API_KEYS;
+  // The environment is the operational source of truth: the validated config is
+  // only a fallback for callers that never loaded it.
+  const raw = process.env.API_KEYS ?? getConfig().API_KEYS;
   if (!raw) return null;
   const keys = raw.split(",").map((k) => k.trim()).filter(Boolean);
   return keys.length ? new Set(keys) : null;
@@ -22,6 +26,10 @@ function loadKeys(): Set<string> | null {
  * General auth middleware.
  * Supports session access tokens and static API keys.
  * If API_KEYS is unset and no token is passed, it passes through (backward compatibility).
+ *
+ * Rejections are handed to `next` as structured errors rather than written to
+ * the response here, so every 401 leaves the service through the canonical
+ * error envelope (code/message/path/correlationId).
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   const keys = loadKeys();
@@ -39,63 +47,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       if (keys && keys.has(token)) {
         return next();
       }
-      res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
-      return;
+      return next(new UnauthorizedError("Invalid or expired token"));
     }
   }
 
   if (!keys) {
-    next();
-    return;
-  }
-
-  res.status(401).json({ error: "Unauthorized", message: "API key required" });
-}
-
-/**
- * Session auth middleware: requires a valid JWT access token.
- * Rejects unauthenticated requests with 401.
- */
-export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const auth = req.headers["authorization"] ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-
-  if (!token) {
-    res.status(401).json({ error: "Unauthorized", message: "Bearer token required" });
-    return;
-  }
-
-  try {
-    const payload = getAuthService().verifyAccessToken(token);
-    req.user = payload;
-    next();
-  } catch {
-    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
-  }
-}
-
-/**
-/**
- * Strict session auth middleware for protected user endpoints.
- * Requires a valid unrevoked access token in Authorization: Bearer <token>.
- */
-export function sessionAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const auth = req.headers["authorization"] ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-
-  if (!token) {
-    res.status(401).json({ error: "Unauthorized", message: "Missing authorization token" });
-    return;
-  }
-
-  try {
-    const payload = getAuthService().verifyAccessToken(token);
-    req.user = payload;
     return next();
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Invalid or expired token";
-    res.status(401).json({ error: "Unauthorized", message });
   }
+
+  // Static keys are configured but this request carried no bearer token.
+  next(new UnauthorizedError("Missing Authorization header"));
 }
 
 /**
@@ -111,13 +72,14 @@ export function sessionAuthMiddleware(req: Request, res: Response, next: NextFun
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
 
   if (!token) {
-    res.status(401).json({ error: "Unauthorized", message: "Bearer access token required" });
+    res.status(401).json({ error: "Unauthorized", message: "Missing Authorization header" });
     return;
   }
 
   try {
-    req.user = getAuthService().verifyAccessToken(token);
-    next();
+    const payload = getAuthService().verifyAccessToken(token);
+    req.user = payload;
+    return next();
   } catch {
     res.status(401).json({ error: "Unauthorized", message: "Invalid or expired token" });
   }
@@ -149,7 +111,7 @@ export function optionalAuthMiddleware(req: Request, _res: Response, next: NextF
 export function resolveAdminApiKey(): string | undefined {
   let fromConfig: string | undefined;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     fromConfig = (require("../../config") as typeof import("../../config")).getConfig()
       .ADMIN_API_KEY;
   } catch {

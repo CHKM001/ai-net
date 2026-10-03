@@ -50,7 +50,12 @@ function readEnvFlag(flag: FeatureFlag): boolean | undefined {
   const cfg = getConfig() as Record<string, any>;
   const key = `FEATURE_${flag.toUpperCase()}`;
   const val = cfg[key];
-  if (val === undefined || val === null) return undefined;
+  // `.env` files copied from `.env.example` ship these keys empty; an empty
+  // value means "not configured", never "false" — otherwise merely copying the
+  // example would silently disable safety flags such as agent_ownership_proof.
+  if (val === undefined || val === null || (typeof val === "string" && val.trim() === "")) {
+    return undefined;
+  }
   if (typeof val === "boolean") return val;
   return val === "1" || String(val).toLowerCase() === "true";
 }

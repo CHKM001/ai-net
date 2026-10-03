@@ -109,7 +109,7 @@ export interface EventRetentionOptions {
  * inject their own without opening SQLite).
  */
 function defaultTaskStatusLookup(taskId: string): TaskStatus | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
   const { getTask } = require("../coordinator/taskStore") as typeof import("../coordinator/taskStore");
   return getTask(taskId)?.status;
 }
@@ -170,7 +170,7 @@ export class EventRetentionService {
    */
   private resolveStore(): EventStore {
     if (this.eventStore) return this.eventStore;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     const { getEventStore } = require("../events/eventStore") as typeof import("../events/eventStore");
     return getEventStore();
   }

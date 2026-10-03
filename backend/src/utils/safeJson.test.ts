@@ -8,7 +8,7 @@
  * late. `jest.resetModules()` + a dynamic `import()` inside `beforeAll` re-loads
  * `safeJson` against the mock, keeping pino out of the unit suite.
  */
-jest.mock("./logger", () => ({
+jest.mock("./logger.js", () => ({
   __esModule: true,
   default: {
     debug: jest.fn(),
@@ -18,7 +18,7 @@ jest.mock("./logger", () => ({
   },
 }));
 
-type SafeJsonModule = typeof import("./safeJson");
+type SafeJsonModule = typeof import("./safeJson.js");
 type LoggerModule = { default: { warn: jest.Mock } };
 
 let safeJsonArray!: SafeJsonModule["safeJsonArray"];
@@ -26,8 +26,8 @@ let warn!: jest.Mock;
 
 beforeAll(async () => {
   jest.resetModules();
-  const safeJson = await import("./safeJson");
-  const loggerModule = (await import("./logger")) as unknown as LoggerModule;
+  const safeJson = await import("./safeJson.js");
+  const loggerModule = (await import("./logger.js")) as unknown as LoggerModule;
   safeJsonArray = safeJson.safeJsonArray;
   warn = loggerModule.default.warn;
 });

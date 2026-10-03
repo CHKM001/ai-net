@@ -13,7 +13,7 @@ import express from "express";
 
 import { createApp } from "../../src/api/app";
 import { createTaskDb, getTaskDb } from "../../src/db/tasks";
-import { createAgentDb, getAgentDb } from "../../src/db/agents";
+import { createAgentDb, ensureAgentTable, getAgentDb } from "../../src/db/agents";
 
 // ── Bootstrap config before any imports that call getConfig() ─────────────────
 beforeAll(() => {
@@ -51,14 +51,7 @@ function makeInMemoryTaskDb(): Database.Database {
 
 function makeInMemoryAgentDb(): Database.Database {
   const db = new Database(":memory:");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY, capabilities TEXT NOT NULL, pricingXLM REAL NOT NULL,
-      endpoint TEXT NOT NULL, stellarPublicKey TEXT NOT NULL,
-      reputationScore REAL NOT NULL DEFAULT 0, lastSeenAt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'online'
-    )
-  `);
+  ensureAgentTable(db);
   return db;
 }
 

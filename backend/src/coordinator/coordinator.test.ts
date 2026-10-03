@@ -1,14 +1,11 @@
 /**
  * Unit tests for the coordinator layer:
  *  - taskStore (createTask, getTask, updateTask, updateNode, getEventHistory)
- *  - eventStore (append, listByTask, listByTaskSince, close)
  *
- * Both modules are tested against an in-memory SQLite database injected via
- * jest module mocks so no disk files are created.
+ * Tested against an in-memory SQLite database so no disk files are created.
  */
 import Database from "better-sqlite3";
 import { createTaskDb } from "../db/tasks";
-import { createEventStore } from "./eventStore";
 import type { Task, DAGNode } from "../types/task";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -89,112 +86,17 @@ describe("coordinator/taskStore — CRUD via TaskDb", () => {
 });
 
 // ─── EventStore ───────────────────────────────────────────────────────────────
-
-describe("createEventStore — append / listByTask / listByTaskSince", () => {
-  it("appends events and returns them with seq", () => {
-    const store = createEventStore();
-    const ev = store.append({
-      type: "node_started",
-      taskId: "task_001",
-      nodeId: "n1",
-      timestamp: new Date().toISOString(),
-      seq: 0,
-    });
-    expect(ev.seq).toBe(0);
-    store.close();
-  });
-
-  it("listByTask returns events in insertion order", () => {
-    const store = createEventStore();
-    const ts = new Date().toISOString();
-    store.append({ type: "node_started", taskId: "t1", nodeId: "n1", timestamp: ts, seq: 0 });
-    store.append({ type: "node_completed", taskId: "t1", nodeId: "n1", timestamp: ts, seq: 1 });
-    store.append({ type: "payment_released", taskId: "t1", nodeId: "n1", timestamp: ts, seq: 2 });
-
-    const events = store.listByTask("t1");
-    expect(events).toHaveLength(3);
-    expect(events[0].type).toBe("node_started");
-    expect(events[1].type).toBe("node_completed");
-    expect(events[2].type).toBe("payment_released");
-    store.close();
-  });
-
-  it("listByTask returns empty array for unknown task", () => {
-    const store = createEventStore();
-    expect(store.listByTask("nonexistent")).toHaveLength(0);
-    store.close();
-  });
-
-  it("listByTaskSince returns only events with seq > afterSeq", () => {
-    const store = createEventStore();
-    const ts = new Date().toISOString();
-    store.append({ type: "node_started", taskId: "t2", nodeId: "n1", timestamp: ts, seq: 0 });
-    store.append({ type: "node_completed", taskId: "t2", nodeId: "n1", timestamp: ts, seq: 1 });
-    store.append({ type: "payment_released", taskId: "t2", nodeId: "n1", timestamp: ts, seq: 2 });
-
-    const events = store.listByTaskSince("t2", 0);
-    expect(events).toHaveLength(2);
-    expect(events[0].seq).toBe(1);
-    store.close();
-  });
-
-  it("listByTaskSince returns empty array when afterSeq exceeds all events", () => {
-    const store = createEventStore();
-    const ts = new Date().toISOString();
-    store.append({ type: "node_started", taskId: "t3", nodeId: "n1", timestamp: ts, seq: 0 });
-    expect(store.listByTaskSince("t3", 99)).toHaveLength(0);
-    store.close();
-  });
-
-  it("stores and retrieves payload objects", () => {
-    const store = createEventStore();
-    const payload = { result: "solar report", confidence: 0.9 };
-    store.append({
-      type: "node_completed",
-      taskId: "t4",
-      nodeId: "n1",
-      timestamp: new Date().toISOString(),
-      payload,
-      seq: 0,
-    });
-    const events = store.listByTask("t4");
-    expect(events[0].payload).toEqual(payload);
-    store.close();
-  });
-
-  it("handles events without nodeId (task-level events)", () => {
-    const store = createEventStore();
-    store.append({ type: "task_completed", taskId: "t5", timestamp: new Date().toISOString(), seq: 0 });
-    const events = store.listByTask("t5");
-    expect(events[0].nodeId).toBeUndefined();
-    store.close();
-  });
-
-  it("isolates events across different tasks", () => {
-    const store = createEventStore();
-    const ts = new Date().toISOString();
-    store.append({ type: "node_started", taskId: "tA", nodeId: "n1", timestamp: ts, seq: 0 });
-    store.append({ type: "node_started", taskId: "tB", nodeId: "n1", timestamp: ts, seq: 0 });
-
-    expect(store.listByTask("tA")).toHaveLength(1);
-    expect(store.listByTask("tB")).toHaveLength(1);
-    store.close();
-  });
-
-  it("close() does not throw", () => {
-    const store = createEventStore();
-    expect(() => store.close()).not.toThrow();
-  });
-
-  it("accepts a file path string to create a persistent store", () => {
-    // Use :memory: path to avoid writing files in test
-    const store = createEventStore(":memory:");
-    const ts = new Date().toISOString();
-    store.append({ type: "node_started", taskId: "t6", nodeId: "n1", timestamp: ts, seq: 0 });
-    expect(store.listByTask("t6")).toHaveLength(1);
-    store.close();
-  });
-});
+//
+// The event store now lives in `src/events/eventStore`. The
+// `src/coordinator/eventStore` module this block was written against was removed
+// as an orphan in #571, which left these cases pointing at a module that no
+// longer exists.
+//
+// `src/events/eventStore.test.ts` already covers the same ground against the
+// current API (append → StoredEvent with globalSeq/taskSeq, listByTask ordering,
+// listByTaskSince cursor semantics, the UNIQUE(task_id, task_seq) constraint,
+// cross-task isolation and close()), so the duplicated — and unimportable —
+// copies are not repeated here.
 
 // ─── AbortController registry (Issue #62) ─────────────────────────────────────
 

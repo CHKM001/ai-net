@@ -71,6 +71,17 @@ export abstract class BaseAgent {
   protected readonly venice: VeniceClientLike;
   protected readonly apiBaseUrl: string;
   protected readonly agentId: string;
+  /**
+   * Stellar account this agent registers under (#557). Resolved from the
+   * explicit config first so a caller can impersonate a specific account, then
+   * from STELLAR_PUBLIC_KEY for the single-agent deployment case.
+   */
+  protected readonly stellarPublicKey: string;
+  /**
+   * Secret backing {@link stellarPublicKey} (#558). Held in memory only — never
+   * logged and never sent to the coordinator.
+   */
+  protected readonly stellarSecret?: string;
   protected readonly log = createLogger({ component: 'agent' });
   private readonly heartbeatClient: HeartbeatClient | null = null;
   /** Token counters for the task currently executing, reset per execute(). */

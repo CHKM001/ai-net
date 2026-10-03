@@ -1,7 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { Horizon } from "@stellar/stellar-sdk";
-import { verifyWalletSignature } from "../../services/auth/walletChallenge";
 import { getAgentDb, createAgentDb, AgentDb } from "../../db/agents";
 import {
   agentAuthFailureGuard,
@@ -500,7 +499,7 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
         // Verify Stellar account exists
         if (process.env.SKIP_STELLAR_ACCOUNT_VERIFY !== "true") {
           try {
-            await horizon.loadAccount(data.stellarPublicKey);
+            await getHorizon().loadAccount(data.stellarPublicKey);
           } catch (error: any) {
             if (error?.response?.status === 404) {
               throw new ValidationError(
@@ -710,11 +709,18 @@ export function createAgentsRouter(options: AgentsRouterOptions = {}): Router {
     agentAuthFailureGuard,
     async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       try {
-        const isValid = verifyWalletSignature(agent.stellarPublicKey, challenge, signature);
-        if (!isValid) {
-          throw new UnauthorizedError("Invalid signature", undefined, correlationId);
+        const correlationId = res.locals.correlationId as string | undefined;
+        const db = getDb();
+        const agent = db.findById(req.params.id);
+        if (!agent) {
+          throw new NotFoundError("Agent", req.params.id, undefined, correlationId);
         }
 
+        // Ownership is proven by the shared challenge–response helper, exactly
+        // as register and heartbeat do: it validates the challenge purpose, the
+        // claimed public key and the payload hash, and it burns the nonce. A
+        // second, ad-hoc `verifyWalletSignature` over the raw challenge would
+        // reject the canonical message clients actually sign (#557/#558).
         requireOwnership(req, res, {
           purpose: "delete",
           publicKey: agent.stellarPublicKey,

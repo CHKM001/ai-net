@@ -33,7 +33,7 @@ import {
 } from "./routes/stream";
 import type { DAGNode } from "../types/task";
 import { agentsRouter } from "./routes/agents";
-import { healthRouter } from "./routes/health";
+import { healthRouter, migrationsRouter } from "./routes/health";
 import { metricsRouter } from "./routes/metrics";
 import { createStatsRouter } from "./routes/stats";
 import { createReconciliationRouter, type ReconciliationRouterOptions } from "./routes/reconciliation";
@@ -90,7 +90,7 @@ export interface AppOptions {
 
 function tryLoadStellarRelease(): StellarReleasePaymentFn | undefined {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     return require("../../../smart-contracts/src/payment/payment")
       .releasePayment as StellarReleasePaymentFn;
   } catch {
@@ -114,13 +114,29 @@ function tryLoadRegistryLookup():
   | undefined {
   if (!getConfig().REGISTRY_CONTRACT_ID) return undefined;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     return require("../../../smart-contracts/src/registry/registry") as {
       getAgent: (id: string) => unknown;
     };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Route descriptor for endpoints that live behind an `API-Version` dispatcher.
+ *
+ * The task endpoints dispatch on the negotiated `API-Version` header, so they
+ * live behind a dispatcher function and cannot be recovered by walking the
+ * Express router stack. They are published here so route-introspection tooling
+ * (the OpenAPI parity test) can see the same routers the server dispatches to,
+ * instead of re-deriving the mount path and re-instantiating the factories.
+ */
+export interface VersionDispatchedRoutes {
+  /** Path the dispatching middleware is mounted at. */
+  mountPath: string;
+  /** Every router the dispatcher can route to, for the given mount path. */
+  routers: Router[];
 }
 
 export function createApp(opts: AppOptions = {}): {
@@ -152,7 +168,13 @@ export function createApp(opts: AppOptions = {}): {
   app.use(requestId);
   app.use(requestLogger);
   app.use(metricsMiddleware);
-  app.use(rateLimitMiddleware);
+  // Rate limiting is an edge concern: the limiter itself is covered directly by
+  // its unit suite, so the app-level mount is skipped under NODE_ENV=test (the
+  // same convention compression uses below) — otherwise integration suites
+  // throttle their own second request and assert against a 429.
+  if (config.NODE_ENV !== "test") {
+    app.use(rateLimitMiddleware);
+  }
   app.use(versioningMiddleware);
   app.use(
     readOnlyMiddleware({
@@ -249,6 +271,10 @@ export function createApp(opts: AppOptions = {}): {
 
   // ── Health routes ───────────────────────────────────────────────────────────
   app.use("/health", publicLimiter.middleware, healthRouter);
+
+  // Schema migration status (Issue #274). Admin-guarded and rate limited like
+  // the other operational endpoints rather than the public health probes.
+  app.use("/migrations", adminLimiter.middleware, migrationsRouter);
 
   // ── Metrics routes (Issue #499) ───────────────────────────────────────────
   app.use("/metrics", metricsRouter);

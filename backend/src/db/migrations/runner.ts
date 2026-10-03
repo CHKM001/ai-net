@@ -6,6 +6,9 @@
  * transaction together with the bookkeeping INSERT: if the SQL fails the whole
  * unit rolls back and no later migration is attempted.
  *
+ * This module is the execution engine. Reading and writing the bookkeeping
+ * table is {@link MigrationTracker}'s job, kept in `./tracker`.
+ *
  * @example
  * ```ts
  * const runner = new MigrationRunner(db, loadMigrations(dir));
@@ -16,22 +19,14 @@
 import type Database from "better-sqlite3";
 import { createLogger } from "../../utils/logger";
 import { loadMigrations, resolveMigrationsDir, type Migration } from "./loader";
+import { MigrationTracker, type MigrationRecord } from "./tracker";
 import type { Logger } from "pino";
 
-/** Row shape of the `schema_migrations` bookkeeping table. */
-export interface AppliedMigration {
-  id: string;
-  filename: string;
-  sql: string;
-  appliedAt: string;
-}
-
-/** Full bookkeeping row, including the fields used for drift detection. */
-export interface MigrationRecord extends AppliedMigration {
-  name: string;
-  checksum: string;
-  downSql: string | null;
-}
+// Version tracking lives in ./tracker; re-exported here so the module's public
+// surface stays a single import site for callers of the runner.
+export { SCHEMA_MIGRATIONS_DDL } from "./tracker";
+export type { AppliedMigration } from "./tracker";
+export type { MigrationRecord };
 
 export type MigrationDirection = "up" | "down";
 
@@ -79,19 +74,6 @@ export interface DownOptions extends UpOptions {
   steps?: number;
 }
 
-/** DDL for the bookkeeping table. Bootstrapped by the runner, not a migration. */
-export const SCHEMA_MIGRATIONS_DDL = `
-  CREATE TABLE IF NOT EXISTS schema_migrations (
-    id         TEXT PRIMARY KEY,
-    filename   TEXT NOT NULL UNIQUE,
-    name       TEXT NOT NULL,
-    checksum   TEXT NOT NULL,
-    sql        TEXT NOT NULL,
-    down_sql   TEXT,
-    applied_at TEXT NOT NULL
-  )
-`;
-
 /** Base class for every failure raised by the runner. */
 export class MigrationError extends Error {
   constructor(message: string) {
@@ -126,18 +108,9 @@ export class MigrationFailedError extends MigrationError {
   }
 }
 
-interface MigrationRow {
-  id: string;
-  filename: string;
-  name: string;
-  checksum: string;
-  sql: string;
-  down_sql: string | null;
-  applied_at: string;
-}
-
 export class MigrationRunner {
   private readonly db: Database.Database;
+  private readonly tracker: MigrationTracker;
   private readonly migrations: Migration[];
   private readonly logger: Logger;
   private readonly includeDownMigrations: boolean;
@@ -148,6 +121,7 @@ export class MigrationRunner {
     options: MigrationRunnerOptions = {},
   ) {
     this.db = db;
+    this.tracker = new MigrationTracker(db);
     this.migrations = [...migrations].sort((a, b) => a.version - b.version);
     this.logger = options.logger ?? createLogger({ component: "db-migrate" });
     this.includeDownMigrations = options.includeDownMigrations ?? false;
@@ -162,41 +136,30 @@ export class MigrationRunner {
     return new MigrationRunner(db, loadMigrations(dir), options);
   }
 
+  /** Version tracker backing this runner's applied-state bookkeeping. */
+  get versionTracker(): MigrationTracker {
+    return this.tracker;
+  }
+
   /** Create `schema_migrations` if it does not exist. Safe to call repeatedly. */
   ensureMigrationsTable(): void {
-    this.db.exec(SCHEMA_MIGRATIONS_DDL);
+    this.tracker.ensureTable();
   }
 
   /** Every applied migration, ordered by version. */
   listApplied(): MigrationRecord[] {
-    this.ensureMigrationsTable();
-    const rows = this.db
-      .prepare(
-        "SELECT id, filename, name, checksum, sql, down_sql, applied_at FROM schema_migrations ORDER BY id ASC",
-      )
-      .all() as MigrationRow[];
-
-    return rows.map((row) => ({
-      id: row.id,
-      filename: row.filename,
-      name: row.name,
-      checksum: row.checksum,
-      sql: row.sql,
-      downSql: row.down_sql,
-      appliedAt: row.applied_at,
-    }));
+    return this.tracker.list();
   }
 
   /** Migrations on disk that are not yet recorded, ordered by version. */
   listPending(): Migration[] {
-    const applied = new Map(this.listApplied().map((row) => [row.id, row]));
+    const applied = this.tracker.map();
     return this.migrations.filter((migration) => !applied.has(migration.id));
   }
 
   /** Highest applied version, or `null` for a database that has never migrated. */
   currentVersion(): string | null {
-    const applied = this.listApplied();
-    return applied.length === 0 ? null : applied[applied.length - 1].id;
+    return this.tracker.latestVersion();
   }
 
   /**
@@ -353,20 +316,7 @@ export class MigrationRunner {
   private applyOne(migration: Migration): void {
     const run = this.db.transaction(() => {
       this.db.exec(migration.upSql);
-      this.db
-        .prepare(
-          `INSERT INTO schema_migrations (id, filename, name, checksum, sql, down_sql, applied_at)
-           VALUES (@id, @filename, @name, @checksum, @sql, @downSql, @appliedAt)`,
-        )
-        .run({
-          id: migration.id,
-          filename: migration.filename,
-          name: migration.name,
-          checksum: migration.checksum,
-          sql: migration.upSql,
-          downSql: migration.downSql,
-          appliedAt: new Date().toISOString(),
-        });
+      this.tracker.record(migration, new Date().toISOString());
     });
     run();
   }
@@ -375,7 +325,7 @@ export class MigrationRunner {
   private revertOne(migration: Migration): void {
     const run = this.db.transaction(() => {
       this.db.exec(migration.downSql as string);
-      this.db.prepare("DELETE FROM schema_migrations WHERE id = ?").run(migration.id);
+      this.tracker.forget(migration.id);
     });
     run();
   }
@@ -386,7 +336,7 @@ export class MigrationRunner {
    */
   private assertNoDrift(): void {
     const byId = new Map(this.migrations.map((migration) => [migration.id, migration]));
-    for (const record of this.listApplied()) {
+    for (const record of this.tracker.list()) {
       const migration = byId.get(record.id);
       if (!migration) {
         throw new MigrationError(

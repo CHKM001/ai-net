@@ -26,7 +26,7 @@
 import path from "path";
 import fs from "fs";
 import { createLogger } from "../utils/logger";
-import type { Database } from "better-sqlite3";
+import type Database from "better-sqlite3";
 
 const logger = createLogger({ component: "db-maintenance" });
 
@@ -269,6 +269,7 @@ export function defaultMaintenanceDatabases(): MaintenanceDb[] {
   // The event store is included so WAL checkpointing and vacuum cover the table
   // that grows fastest (issue #383).  It is skipped when configured as
   // `:memory:`, since there is no file to checkpoint and nothing to back up.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const eventStorePath = require("../events/eventStore").getEventStorePath() as string;
   const eventStoreDb: MaintenanceDb[] =
     eventStorePath === ":memory:"
@@ -278,6 +279,8 @@ export function defaultMaintenanceDatabases(): MaintenanceDb[] {
             name: "events",
             path: eventStorePath,
             getConnection: () => {
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
+              // eslint-disable-next-line @typescript-eslint/no-var-requires
               const { getEventStoreConnection } = require("../events/eventStore") as typeof import("../events/eventStore");
               const connection = getEventStoreConnection();
               if (!connection) {
@@ -293,21 +296,25 @@ export function defaultMaintenanceDatabases(): MaintenanceDb[] {
     {
       name: "payments",
       path: path.join(process.cwd(), "payments.db"),
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       getConnection: () => require("../db").getDb(),
     },
     {
       name: "tasks",
       path: path.join(process.cwd(), "tasks.db"),
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       getConnection: () => require("../db/tasks").getTaskDb(),
     },
     {
       name: "agents",
       path: path.join(process.cwd(), "agents.db"),
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       getConnection: () => require("../db/agents").getAgentDb(),
     },
     {
       name: "jobs",
       path: path.join(process.cwd(), "jobs.db"),
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       getConnection: () => require("../queue/jobStore").getJobDb(),
     },
   ];

@@ -96,7 +96,7 @@ export function createRateLimiter(opts: RateLimitOptions = {}): RateLimiter {
     const now = Date.now();
     const cutoff = now - windowMs;
 
-    let win = windows.get(ip) ?? { timestamps: [] };
+    const win = windows.get(ip) ?? { timestamps: [] };
     win.timestamps = win.timestamps.filter((t) => t > cutoff);
 
     const oldest = win.timestamps[0];
@@ -140,7 +140,7 @@ export class RedisRateLimiter {
 
   constructor(redisUrl: string) {
     // Lazy-require ioredis so the module doesn't break when Redis is not used
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     const Redis = require("ioredis");
     this.client = new Redis(redisUrl);
     this.fallback = createRateLimiter({ maxRequests: 5, windowMs: 60_000 });
@@ -411,14 +411,12 @@ export function agentAuthFailureGuard(req: Request, res: Response, next: NextFun
   }
 
   const ip = req.ip ?? "unknown";
-  const windowMs = readEnvWindowMs(
-    "AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS",
-    getConfig().AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS,
-  );
-  const maxFailures = readEnvInt(
-    "AGENT_AUTH_FAILURE_LIMIT_MAX",
-    getConfig().AGENT_AUTH_FAILURE_LIMIT_MAX,
-  );
+  // Both limits are part of the validated config, which is itself built from
+  // the environment (AGENT_AUTH_FAILURE_LIMIT_*), so there is no raw env read
+  // to do here.
+  const config = getConfig();
+  const windowMs = config.AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS;
+  const maxFailures = config.AGENT_AUTH_FAILURE_LIMIT_MAX;
 
   const cutoff = Date.now() - windowMs;
   const timestamps = (failureWindows.get(ip)?.timestamps ?? []).filter((t) => t > cutoff);

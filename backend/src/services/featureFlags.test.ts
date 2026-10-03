@@ -6,14 +6,29 @@ import {
   KNOWN_FLAGS,
 } from "./featureFlags";
 
-const originalEnv = { ...process.env };
+/** Environment variables this suite drives; saved and restored per test. */
+const MANAGED_ENV_VARS = ["FEATURE_DAG_PREVIEW", "FEATURE_EXPERIMENTAL_AGENTS"] as const;
 
+const savedEnv = new Map<string, string | undefined>();
+
+const originalEnv = { ...process.env };
 beforeEach(() => {
+  for (const key of MANAGED_ENV_VARS) {
+    savedEnv.set(key, process.env[key]);
+  }
   clearRuntimeOverrides();
   process.env = { ...originalEnv };
 });
 
 afterEach(() => {
+  for (const key of MANAGED_ENV_VARS) {
+    const previous = savedEnv.get(key);
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
   clearRuntimeOverrides();
   process.env = { ...originalEnv };
 });

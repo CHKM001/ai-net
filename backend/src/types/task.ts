@@ -10,7 +10,7 @@ import type { QualityScore } from "../services/qualityScorer.types";
 export type TaskStatus = "queued" | "running" | "completed" | "cancelled" | "failed";
 
 /** Node-level statuses used by the coordinator during DAG execution. */
-export type NodeStatus = "pending" | "running" | "completed" | "failed";
+export type NodeStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export interface DAGNode {
   nodeId: string;

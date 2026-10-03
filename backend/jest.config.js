@@ -21,7 +21,14 @@ module.exports = {
   },
   moduleNameMapper: {
     '^@stellar/stellar-sdk$': '<rootDir>/__mocks__/@stellar/stellar-sdk.js',
-    '^better-sqlite3$': '<rootDir>/__mocks__/better-sqlite3.js',
+    // NOTE: `better-sqlite3` is intentionally NOT mapped to __mocks__ here.
+    // It used to be, because v9.6.0 shipped no prebuilt binaries for Node on
+    // Windows and compiling it needed a C++ toolchain — so every SQLite-backed
+    // suite silently ran against a hand-written statement stub, which cannot
+    // execute real DDL. Since the dependency moved to v13 (prebuilds for Node
+    // 24 on all platforms) the real module loads, so the DB suites exercise
+    // actual SQLite again: migrations, schema shapes and UNIQUE constraints
+    // included.
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
   collectCoverageFrom: [

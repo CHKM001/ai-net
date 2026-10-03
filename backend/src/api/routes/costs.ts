@@ -100,7 +100,7 @@ function requireTaskOwnership(req: Request, taskId: string): void {
   const db = createTaskDb(getTaskDb());
   const task = db.findById(taskId);
   if (!task) {
-    throw new NotFoundError("Task", taskId, correlationId);
+    throw new NotFoundError("Task", taskId, undefined, correlationId);
   }
 
   const requesterKey = req.headers["walletpublickey"] as string;

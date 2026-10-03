@@ -128,6 +128,7 @@ function collectWebSocketMetrics(): string {
 function collectQueueMetrics(): string {
   let out = '';
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getJobDb } = require('../queue') as typeof import('../queue');
     const db = getJobDb();
     const rows = db.prepare('SELECT status, COUNT(*) as count FROM jobs GROUP BY status').all() as Array<{ status: string; count: number }>;
@@ -160,6 +161,7 @@ function collectQueueMetrics(): string {
 function collectTaskMetrics(): string {
   let out = '';
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getTaskDb } = require('../db/tasks') as typeof import('../db/tasks');
     const rows = getTaskDb()
       .prepare('SELECT status, COUNT(*) as count FROM tasks GROUP BY status')
@@ -182,6 +184,7 @@ function collectTaskMetrics(): string {
 function collectAgentMetrics(): string {
   let out = '';
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getAgentDb } = require('../db/agents') as typeof import('../db/agents');
     const rows = getAgentDb()
       .prepare('SELECT status, COUNT(*) as count FROM agents GROUP BY status')
@@ -203,6 +206,7 @@ function collectAgentMetrics(): string {
 function collectPaymentMetrics(): string {
   let out = '';
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getDb } = require('../db/index') as typeof import('../db/index');
     const rows = getDb()
       .prepare('SELECT status, COUNT(*) as count, SUM(CAST(amountStroops AS REAL)) as total_stroops FROM payments GROUP BY status')
@@ -228,6 +232,7 @@ function collectLlmMetrics(samples: readonly RequestSample[]): string {
   let out = '';
 
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getTaskDb } = require('../db/tasks') as typeof import('../db/tasks');
     const db = getTaskDb();
 

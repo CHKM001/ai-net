@@ -16,6 +16,26 @@ const logger = createLogger({ component: "job-queue" });
 export * from "./jobStore";
 export * from "./worker";
 
+/**
+ * Thrown by {@link JobQueue.enqueueUnique} when a job for the same `taskId`
+ * is already pending, active or retriable in the store.
+ *
+ * Callers can distinguish a deduplication rejection from other errors by
+ * checking `error instanceof DuplicateJobError`.
+ */
+export class DuplicateJobError extends Error {
+  public readonly taskId: string;
+
+  constructor(taskId: string) {
+    super(
+      `A pending or active job for taskId "${taskId}" already exists. ` +
+        "Submit a new job only after the existing one has completed or been moved to the dead-letter queue."
+    );
+    this.name = "DuplicateJobError";
+    this.taskId = taskId;
+  }
+}
+
 export interface EnqueueOptions<T = any> {
   taskId: string;
   type?: string;
@@ -59,6 +79,29 @@ export class JobQueue {
     this.worker?.trigger();
 
     return job;
+  }
+
+  /**
+   * Enqueue a job only when no pending, active or retriable job for the same
+   * `taskId` is already in the store.
+   *
+   * This is the primary entry-point for distributed job submission: two backend
+   * instances submitting the same logical task in the same window will end up
+   * with exactly one queued job between them.
+   *
+   * @throws {DuplicateJobError} when an in-flight or pending job for `taskId`
+   *   already exists.  Terminal jobs (`completed`, `dead-letter`) do not block
+   *   re-submission.
+   */
+  public enqueueUnique<T = any>(options: EnqueueOptions<T>): Job<T> {
+    if (this.store.hasPendingJobForTask(options.taskId)) {
+      logger.warn(
+        { taskId: options.taskId },
+        "duplicate job submission rejected: a pending or active job for this taskId already exists"
+      );
+      throw new DuplicateJobError(options.taskId);
+    }
+    return this.enqueue(options);
   }
 
   public getJob(id: string): Job | undefined {

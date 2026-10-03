@@ -18,6 +18,7 @@ beforeAll(() => {
 
   // Initialise config singleton if not already done
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { loadConfig } = require("../../config");
     loadConfig();
   } catch {
@@ -28,6 +29,7 @@ beforeAll(() => {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildApp() {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { healthRouter } = require("./health");
   const app = express();
   app.use(express.json());
@@ -158,6 +160,7 @@ describe("GET /health/ready", () => {
 
   beforeEach(() => {
     fetchSpy = jest.spyOn(global, "fetch" as any).mockResolvedValue({ ok: true } as Response);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { metricsService } = require("../../services/metrics");
     wsSpy = jest
       .spyOn(metricsService, "getWebSocketStatus")
@@ -308,6 +311,7 @@ describe("GET /health/dashboard", () => {
     originalKey = process.env.ADMIN_API_KEY;
     process.env.ADMIN_API_KEY = ADMIN_KEY;
 
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { metricsService } = require("../../services/metrics");
     dashboardSpy = jest
       .spyOn(metricsService, "getDashboard")
@@ -474,5 +478,66 @@ describe("GET /health/dashboard", () => {
     expect(res.body.status).toBe("unhealthy");
     expect(res.body.error).toBe("Failed to collect metrics");
     expect(res.body.message).toBe("collection exploded");
+  });
+});
+
+// ── GET /health/queue ─────────────────────────────────────────────────────────
+
+describe("GET /health/queue", () => {
+  let getJobDbMock: jest.SpyInstance;
+  let createJobStoreMock: jest.SpyInstance;
+
+  const mockStats = {
+    pending: 3,
+    active: 2,
+    completed: 10,
+    failed: 1,
+    deadLetter: 0,
+    total: 16,
+  };
+
+  beforeEach(() => {
+    // Mock the queue/jobStore dynamic import used inside the route handler
+    jest.doMock("../../queue/jobStore", () => ({
+      getJobDb: jest.fn().mockReturnValue({}),
+      createJobStore: jest.fn().mockReturnValue({
+        getStats: jest.fn().mockReturnValue(mockStats),
+      }),
+    }));
+  });
+
+  afterEach(() => {
+    jest.resetModules();
+  });
+
+  it("returns 200 with queueDepth, activeJobs, and deadLetterCount", async () => {
+    const app = buildApp();
+    const res = await request(app).get("/health/queue");
+    expect(res.status).toBe(200);
+    expect(typeof res.body.queueDepth).toBe("number");
+    expect(typeof res.body.activeJobs).toBe("number");
+    expect(typeof res.body.deadLetterCount).toBe("number");
+  });
+
+  it("queueDepth equals pending + failed counts", async () => {
+    const app = buildApp();
+    const res = await request(app).get("/health/queue");
+    expect(res.status).toBe(200);
+    // queueDepth = pending + failed (retriable or terminal)
+    expect(res.body.queueDepth).toBe(mockStats.pending + mockStats.failed);
+  });
+
+  it("activeJobs reflects jobs currently being processed", async () => {
+    const app = buildApp();
+    const res = await request(app).get("/health/queue");
+    expect(res.status).toBe(200);
+    expect(res.body.activeJobs).toBe(mockStats.active);
+  });
+
+  it("deadLetterCount reflects jobs that exceeded retry budget", async () => {
+    const app = buildApp();
+    const res = await request(app).get("/health/queue");
+    expect(res.status).toBe(200);
+    expect(res.body.deadLetterCount).toBe(mockStats.deadLetter);
   });
 });

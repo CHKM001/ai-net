@@ -69,6 +69,24 @@ function makeDb(): AgentDb {
     deleteOfflineAgents() {
       return 0;
     },
+
+    // ── Heartbeat watchdog (Issue #379) ──────────────────────────────────────
+    // The ownership tests never exercise the watchdog, so these only need to
+    // satisfy the interface without side effects.
+    markStale() {},
+    clearStale() {},
+    getStaleSince() {
+      return null;
+    },
+    listStaleAgents() {
+      return [];
+    },
+    recordAlert() {
+      return "alert-1";
+    },
+    listAlerts() {
+      return [];
+    },
   };
 }
 

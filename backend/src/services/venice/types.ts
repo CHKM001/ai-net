@@ -1,4 +1,5 @@
-import type { CircuitBreaker } from './circuitBreaker.js';
+import type { CircuitBreaker, CircuitTransition } from './circuitBreaker.js';
+import type { CircuitMetrics, CircuitState } from './circuitBreaker.js';
 import type { VeniceResponseCache } from './cache.js';
 import type { RequestDeduplicator } from './dedup.js';
 
@@ -83,12 +84,28 @@ export interface VeniceClientConfig {
   cache?: VeniceResponseCache;
   /** Inject a custom deduplicator (mainly for tests). */
   deduplicator?: RequestDeduplicator;
+
+  // ── Circuit breaker tuning (issue #495) ───────────────────────────────────
+  /**
+   * Consecutive failures that open the circuit. Only used when no
+   * `circuitBreaker` instance is injected. Default: 3 (env
+   * `VENICE_CIRCUIT_FAILURE_THRESHOLD`).
+   */
+  failureThreshold?: number;
+  /** How long the circuit stays `OPEN` before probing. Default: 60_000 (env `VENICE_CIRCUIT_COOLDOWN_MS`). */
+  cooldownMs?: number;
+  /** Concurrent probes admitted while `HALF_OPEN`. Default: 1 (env `VENICE_CIRCUIT_PROBE_COUNT`). */
+  probeCount?: number;
+  /** Notified on every `opened` / `closed` / `half_opened` transition. */
+  onCircuitStateChange?: (transition: CircuitTransition) => void;
 }
 
 export interface VeniceClientLike {
   getModelFor(agentType: AgentType): string;
-  getCircuitState(): unknown;
+  getCircuitState(): CircuitState;
   getFailureCount(): number;
+  /** Full breaker observability: `{ state, failures, successes, lastFailureAt, lastSuccessAt }`. */
+  getCircuitMetrics(): CircuitMetrics;
   chat(messages: VeniceMessage[], options?: VeniceChatOptions): Promise<string>;
   complete(prompt: string, agentType: AgentType, options?: CompleteOptions): Promise<string>;
   stream(

@@ -4,6 +4,7 @@ import type { AgentRegistration, AgentRegistry } from '../types/agent';
 import type { PaymentService } from '../types/payment';
 import { eventBus } from './eventBus';
 import { updateNode, updateTask, getTask, registerTaskController, unregisterTaskController } from './taskStore';
+import { createTaskDb, getTaskDb } from '../db/tasks';
 import type { DAGNode, Task } from '../types/task';
 import {
   QualityScorer,

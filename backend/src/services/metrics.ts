@@ -867,7 +867,9 @@ function errorMessage(error: unknown): string {
 async function checkSqlite(): Promise<DependencyStatus> {
   const startedAt = Date.now();
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getTaskDb } = require("../db/tasks") as typeof import("../db/tasks");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getDb } = require("../db/index") as typeof import("../db/index");
     getTaskDb().prepare("SELECT 1").get();
     getDb().prepare("SELECT 1").get();
@@ -947,6 +949,7 @@ async function probeHttp(
 
 /** Agent population and mean node execution time, read from SQLite. */
 function collectAgentMetrics(): AgentMetrics {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { getAgentDb } = require("../db/agents") as typeof import("../db/agents");
   const rows = getAgentDb()
     .prepare("SELECT status, COUNT(*) AS count FROM agents GROUP BY status")
@@ -954,6 +957,7 @@ function collectAgentMetrics(): AgentMetrics {
 
   let avgResponseTimeMs = 0;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getTaskDb } = require("../db/tasks") as typeof import("../db/tasks");
     const events = getTaskDb()
       .prepare(
@@ -974,6 +978,7 @@ function collectAgentMetrics(): AgentMetrics {
 
 /** Task pipeline counters, read from SQLite. */
 function collectTaskMetrics(): TaskMetrics {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { getTaskDb } = require("../db/tasks") as typeof import("../db/tasks");
   const rows = getTaskDb()
     .prepare("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status")
@@ -983,6 +988,7 @@ function collectTaskMetrics(): TaskMetrics {
 
 /** Escrow totals, read from SQLite and summed exactly as `bigint`. */
 function collectPaymentMetrics(): PaymentMetrics {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { getDb } = require("../db/index") as typeof import("../db/index");
   const rows = getDb()
     .prepare("SELECT status, amountStroops FROM payments")

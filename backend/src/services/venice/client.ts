@@ -25,6 +25,13 @@ interface CacheEnvConfig {
   VENICE_PROVIDER_MAX_RETRIES: number;
 }
 
+/** Circuit-breaker tuning resolved from the environment (issue #495). */
+interface CircuitEnvConfig {
+  VENICE_CIRCUIT_FAILURE_THRESHOLD: number;
+  VENICE_CIRCUIT_COOLDOWN_MS: number;
+  VENICE_CIRCUIT_PROBE_COUNT: number;
+}
+
 const CONFIG_FALLBACK: CacheEnvConfig = {
   VENICE_MODEL_VERSION: 'v1',
   VENICE_CACHE_TTL_MS: 24 * 60 * 60 * 1000,
@@ -33,6 +40,29 @@ const CONFIG_FALLBACK: CacheEnvConfig = {
   VENICE_REQUEST_TIMEOUT_MS: 10_000,
   VENICE_PROVIDER_MAX_RETRIES: 3,
 };
+
+const CIRCUIT_CONFIG_FALLBACK: CircuitEnvConfig = {
+  VENICE_CIRCUIT_FAILURE_THRESHOLD: 3,
+  VENICE_CIRCUIT_COOLDOWN_MS: 60_000,
+  VENICE_CIRCUIT_PROBE_COUNT: 1,
+};
+
+/**
+ * Mirror the breaker's state onto the Prometheus gauge.
+ *
+ * Loaded lazily so the Venice module keeps no import-time dependency on the
+ * metrics service (and therefore on its config/DB wiring); metrics are
+ * best-effort telemetry and must never break a Venice call.
+ */
+function setVeniceCircuitBreakerState(code: number): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+    const { metricsService } = require('../../services/metrics') as typeof import('../../services/metrics');
+    metricsService.setVeniceCircuitBreakerState(code);
+  } catch {
+    // Metrics subsystem unavailable (e.g. a stripped test harness) — ignore.
+  }
+}
 
 const log = createLogger({ module: 'VeniceClient' });
 
@@ -121,6 +151,8 @@ export class VeniceClient implements VeniceClientLike {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly enableCacheFallback: boolean;
+  /** Unsubscribe handles for the breaker's transition listener. */
+  private readonly circuitUnsubscribers: Array<() => void> = [];
 
   // Backward compat: expose primary for existing callers
   private get apiKey(): string {
@@ -138,6 +170,17 @@ export class VeniceClient implements VeniceClientLike {
     this.timeoutMs = config.timeoutMs ?? env.VENICE_REQUEST_TIMEOUT_MS ?? CONFIG_FALLBACK.VENICE_REQUEST_TIMEOUT_MS;
     this.maxRetries = config.maxRetries ?? env.VENICE_PROVIDER_MAX_RETRIES ?? CONFIG_FALLBACK.VENICE_PROVIDER_MAX_RETRIES;
     this.enableCacheFallback = config.enableCacheFallback ?? true;
+
+    // Surface every state transition (`opened` / `closed` / `half_opened`) both
+    // to the caller's listener and to the process-wide metrics gauge.
+    this.circuitUnsubscribers.push(
+      this.breaker.on('*', (transition) => this.onCircuitTransition(transition)),
+    );
+    if (config.onCircuitStateChange) {
+      this.circuitUnsubscribers.push(
+        this.breaker.on('*', (transition) => config.onCircuitStateChange?.(transition)),
+      );
+    }
 
     // Build ordered provider chain: explicit providers wins, otherwise build from config + env fallbacks
     if (config.providers && config.providers.length > 0) {
@@ -160,6 +203,54 @@ export class VeniceClient implements VeniceClientLike {
           cacheConfig.similarityThreshold ?? env.VENICE_CACHE_SIMILARITY_THRESHOLD ?? CONFIG_FALLBACK.VENICE_CACHE_SIMILARITY_THRESHOLD,
       });
     this.deduplicator = config.deduplicator ?? new RequestDeduplicator();
+  }
+
+  /**
+   * Build a breaker with the same three-state semantics as the injected one,
+   * tunable through `VENICE_CIRCUIT_*` env vars (issue #495).
+   */
+  private createBreaker(config: VeniceClientConfig): CircuitBreaker {
+    const env = this.resolveCircuitConfig();
+    return new CircuitBreaker({
+      failureThreshold:
+        config.failureThreshold ??
+        env.VENICE_CIRCUIT_FAILURE_THRESHOLD ??
+        CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_FAILURE_THRESHOLD,
+      cooldownMs:
+        config.cooldownMs ??
+        env.VENICE_CIRCUIT_COOLDOWN_MS ??
+        CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_COOLDOWN_MS,
+      probeCount:
+        config.probeCount ??
+        env.VENICE_CIRCUIT_PROBE_COUNT ??
+        CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_PROBE_COUNT,
+    });
+  }
+
+  /** Fan a breaker transition out to the metrics gauge and the structured log. */
+  private onCircuitTransition(transition: CircuitTransition): void {
+    // 0 = closed, 1 = open, 2 = half-open (see MetricsService).
+    const code = transition.to === 'CLOSED' ? 0 : transition.to === 'OPEN' ? 1 : 2;
+    setVeniceCircuitBreakerState(code);
+    log.info(
+      {
+        event: transition.event,
+        from: transition.from,
+        to: transition.to,
+        reason: transition.reason,
+        failures: transition.failures,
+      },
+      'venice circuit transition',
+    );
+  }
+
+
+  /** Detach the breaker's transition listeners. */
+  dispose(): void {
+    for (const unsubscribe of this.circuitUnsubscribers) {
+      unsubscribe();
+    }
+    this.circuitUnsubscribers.length = 0;
   }
 
   private buildProvidersFromEnv(config: VeniceClientConfig): VeniceProviderConfig[] {
@@ -214,6 +305,25 @@ export class VeniceClient implements VeniceClientLike {
     }
   }
 
+  private resolveCircuitConfig(): CircuitEnvConfig {
+    try {
+      const config = getConfig() as any;
+      return {
+        VENICE_CIRCUIT_FAILURE_THRESHOLD:
+          config?.VENICE_CIRCUIT_FAILURE_THRESHOLD ??
+          CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_FAILURE_THRESHOLD,
+        VENICE_CIRCUIT_COOLDOWN_MS:
+          config?.VENICE_CIRCUIT_COOLDOWN_MS ??
+          CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_COOLDOWN_MS,
+        VENICE_CIRCUIT_PROBE_COUNT:
+          config?.VENICE_CIRCUIT_PROBE_COUNT ??
+          CIRCUIT_CONFIG_FALLBACK.VENICE_CIRCUIT_PROBE_COUNT,
+      };
+    } catch {
+      return CIRCUIT_CONFIG_FALLBACK;
+    }
+  }
+
   private resolveBaseUrl(): string {
     try {
       return getConfig().VENICE_BASE_URL;
@@ -226,12 +336,26 @@ export class VeniceClient implements VeniceClientLike {
     return MODEL_MAP[agentType];
   }
 
-  getCircuitState() {
+  /** Current breaker state: `CLOSED` | `OPEN` | `HALF_OPEN`. */
+  getCircuitState(): CircuitState {
     return this.breaker.getState();
   }
 
-  getFailureCount() {
+  getFailureCount(): number {
     return this.breaker.getFailureCount();
+  }
+
+  /**
+   * Full breaker observability (issue #495):
+   * `{ state, failures, successes, lastFailureAt, lastSuccessAt }`.
+   */
+  getCircuitMetrics(): CircuitMetrics {
+    return this.breaker.getMetrics();
+  }
+
+  /** The breaker itself, for callers that need {@link CircuitBreaker.on}. */
+  getCircuitBreaker(): CircuitBreaker {
+    return this.breaker;
   }
 
   /** Expose provider chain for observability / tests. */
@@ -306,7 +430,23 @@ export class VeniceClient implements VeniceClientLike {
       throw new TokenBudgetExceededError(requested, 0);
     }
 
-    // Circuit breaker check — but allow stale cache fallback even when open
+    // Circuit breaker admission. In HALF_OPEN this reserves one of the probe
+    // slots, so every exit path below must settle it exactly once — either
+    // recordSuccess/recordFailure (from the fetch) or release() (when the call
+    // never reached the network, e.g. a cache hit).
+    let probeHeld = false;
+    let settled = false;
+    const settleSuccess = (): void => {
+      if (settled) return;
+      settled = true;
+      this.breaker.recordSuccess();
+    };
+    const settleFailure = (): void => {
+      if (settled) return;
+      settled = true;
+      this.breaker.recordFailure();
+    };
+
     try {
       this.breaker.assertClosed();
     } catch (e) {
@@ -319,12 +459,11 @@ export class VeniceClient implements VeniceClientLike {
           this.reportUsage(options, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
           return stale;
         }
+        throw e;
       }
-      throw e;
-    }
 
-    const force = options?.force === true;
-    const cacheKey = buildCacheKey(promptForLogging, agentType, this.modelVersion);
+      const force = options?.force === true;
+      const cacheKey = buildCacheKey(promptForLogging, agentType, this.modelVersion);
 
     if (!force) {
       const cached = this.cache.get(promptForLogging, agentType, this.modelVersion);
@@ -336,7 +475,6 @@ export class VeniceClient implements VeniceClientLike {
         this.reportUsage(options, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
         return cached;
       }
-    }
 
     const runFetch = (): Promise<FetchOutcome> =>
       this.runVeniceFetch({ messages, model, options, maxTokens, promptForLogging, agentType });
@@ -358,9 +496,8 @@ export class VeniceClient implements VeniceClientLike {
           this.reportUsage(options, estimateUsage(promptForLogging, ''));
           return stale;
         }
+        throw err;
       }
-      throw err;
-    }
 
     // Report here rather than inside runVeniceFetch: the deduplicator shares
     // one promise across concurrent identical requests, and each caller passed
@@ -393,6 +530,8 @@ export class VeniceClient implements VeniceClientLike {
     maxTokens,
     promptForLogging,
     agentType,
+    settleSuccess,
+    settleFailure,
   }: {
     messages: VeniceMessage[];
     model: string;
@@ -459,7 +598,7 @@ export class VeniceClient implements VeniceClientLike {
           continue;
         }
         // Last provider failed — record failure for circuit breaker
-        this.breaker.recordFailure();
+        settleFailure();
         this.logRequest(requestId, agentType, model, promptForLogging, Date.now() - start, 'error', retries, provider.name);
         // If we have stale cache fallback enabled, the caller (createCompletion) will handle it
         throw lastError;
@@ -467,7 +606,7 @@ export class VeniceClient implements VeniceClientLike {
     }
 
     // Should not reach here, but fallback
-    this.breaker.recordFailure();
+    settleFailure();
     throw lastError ?? new Error('Venice AI is unreachable (all providers failed)');
   }
 
@@ -489,7 +628,24 @@ export class VeniceClient implements VeniceClientLike {
       throw new TokenBudgetExceededError(requested, 0);
     }
 
-    this.breaker.assertClosed();
+    // Streams have no cache to fall back on, so an open circuit is shed with
+    // CircuitOpenError. In HALF_OPEN a probe slot is reserved and settled by
+    // exactly one of the recordSuccess/recordFailure calls below.
+    let probeHeld = false;
+    let settled = false;
+    const settleSuccess = (): void => {
+      if (settled) return;
+      settled = true;
+      this.breaker.recordSuccess();
+    };
+    const settleFailure = (): void => {
+      if (settled) return;
+      settled = true;
+      this.breaker.recordFailure();
+    };
+
+    this.breaker.acquire();
+    probeHeld = this.breaker.getState() === 'HALF_OPEN';
 
     const model = this.getModelFor(agentType);
     const requestId = randomUUID();
@@ -521,9 +677,9 @@ export class VeniceClient implements VeniceClientLike {
       try {
         const response = await this.fetchWithRetryForProvider(body, provider, () => { retries++; });
 
-        if (!response.body) {
-          throw new Error('Venice stream response has no body');
-        }
+          if (!response.body) {
+            throw new Error('Venice stream response has no body');
+          }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -581,8 +737,6 @@ export class VeniceClient implements VeniceClientLike {
                   accumulated += delta;
                   deltas.push(delta);
                 }
-              } catch {
-                // skip malformed SSE chunks
               }
             }
           }
@@ -643,9 +797,14 @@ export class VeniceClient implements VeniceClientLike {
           `Venice stream error after ${delivered} characters delivered: ${lastError.message}`
         );
       }
-    }
 
-    throw lastError ?? new Error('Venice stream failed (all providers)');
+      settleFailure();
+      throw lastError ?? new Error('Venice stream failed (all providers)');
+    } finally {
+      if (probeHeld && !settled) {
+        this.breaker.release();
+      }
+    }
   }
 
   /**

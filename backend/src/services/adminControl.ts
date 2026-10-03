@@ -79,6 +79,16 @@ export function setReadOnlyState(enabled: boolean, actor: string, reason?: strin
   return getReadOnlyState();
 }
 
+/** Current read-only state, copied so callers cannot mutate the live value. */
+export function getReadOnlyState(): ReadOnlyState {
+  return { ...readOnlyState };
+}
+
+/** Whether the API is currently refusing mutations. */
+export function isReadOnly(): boolean {
+  return readOnlyState.enabled;
+}
+
 export function actorFromRequest(req: Request): string {
   const actorHeader = req.headers["x-admin-actor"];
   const actor = Array.isArray(actorHeader) ? actorHeader[0] : actorHeader;

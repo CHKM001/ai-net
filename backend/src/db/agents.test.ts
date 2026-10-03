@@ -3,25 +3,29 @@
  *
  * Uses an in-memory SQLite database so no files are created on disk.
  */
+import fs from "fs";
+import os from "os";
+import path from "path";
 import Database from "better-sqlite3";
-import { createAgentDb, type AgentRecord } from "./agents";
+import {
+  closeAgentDb,
+  createAgentDb,
+  ensureAgentTable,
+  getAgentDb,
+  getAgentPool,
+  type AgentRecord,
+} from "./agents";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * A raw handle with the schema already applied, mirroring what the pool's
+ * `onCreate` hook leaves behind. `createAgentDb` is a pure mapping now, so the
+ * fixture has to initialise the schema itself.
+ */
 function makeDb(): Database.Database {
   const db = new Database(":memory:");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id               TEXT PRIMARY KEY,
-      capabilities     TEXT NOT NULL,
-      pricingXLM       REAL NOT NULL,
-      endpoint         TEXT NOT NULL,
-      stellarPublicKey TEXT NOT NULL,
-      reputationScore  REAL NOT NULL DEFAULT 0,
-      lastSeenAt       TEXT NOT NULL,
-      status           TEXT NOT NULL DEFAULT 'online'
-    )
-  `);
+  ensureAgentTable(db);
   return db;
 }
 
@@ -209,6 +213,64 @@ describe("createAgentDb — markStaleAgents", () => {
     db.upsert(makeAgent({ id: "fresh", status: "online" })); // just inserted = fresh
     const count = db.markStaleAgents(5);
     expect(count).toBe(0);
+  });
+});
+
+// ── Schema initialisation & wrapper memoisation ──────────────────────────────
+
+/** Schema DDL issued through `exec` (the only channel `ensureAgentTable` uses). */
+function ddlFrom(execSpy: jest.SpyInstance): string[] {
+  return execSpy.mock.calls
+    .map(([sql]: [string]) => String(sql))
+    .filter((sql) => /^\s*(CREATE|ALTER|DROP)\b/i.test(sql));
+}
+
+describe("agent schema initialisation", () => {
+  let execSpy: jest.SpyInstance;
+  let dir: string;
+
+  beforeEach(() => {
+    // Spying on the prototype catches the DDL the pool runs while it is still
+    // being constructed, before a test could reach the handle.
+    execSpy = jest.spyOn(Database.prototype as unknown as { exec: () => void }, "exec");
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-init-"));
+  });
+
+  afterEach(() => {
+    closeAgentDb();
+    execSpy.mockRestore();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates the agents schema while the pool is being initialised", () => {
+    getAgentPool(path.join(dir, "agents.db"));
+
+    const ddl = ddlFrom(execSpy).join("\n");
+    expect(ddl).toMatch(/CREATE TABLE IF NOT EXISTS agents/i);
+    // `bondAmountXLM` only appears in `ensureAgentTable`, so this pins the
+    // schema setup to the pool's onCreate hook specifically.
+    expect(ddl).toMatch(/bondAmountXLM/);
+  });
+
+  it("issues zero DDL when wrapping an already-initialised handle", () => {
+    const file = path.join(dir, "agents.db");
+    getAgentPool(file);
+    execSpy.mockClear();
+
+    for (let i = 0; i < 25; i += 1) {
+      createAgentDb(getAgentDb(file));
+    }
+
+    expect(execSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns the same wrapper reference for the same handle", () => {
+    const raw = makeDb();
+    expect(createAgentDb(raw)).toBe(createAgentDb(raw));
+  });
+
+  it("returns a distinct wrapper for a different handle", () => {
+    expect(createAgentDb(makeDb())).not.toBe(createAgentDb(makeDb()));
   });
 });
 

@@ -59,7 +59,7 @@ export function createVersionsRouter(): Router {
   const router = Router();
 
   router.get("/", (_req: Request, res: Response) => {
-    const manifest = getVersionManifest();
+    const manifest = VERSION_MANIFEST;
     const current = manifest.find((v) => v.status === "current");
     res.json({
       latestVersion: current?.version ?? "2.0",

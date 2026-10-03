@@ -13,7 +13,7 @@
 import express from 'express';
 import request from 'supertest';
 import Database from 'better-sqlite3';
-import { createAgentDb, type AgentDb } from '../src/db/agents';
+import { createAgentDb, ensureAgentTable, type AgentDb } from '../src/db/agents';
 import { createAgentsRouter } from '../src/api/routes/agents';
 import { Request, Response, NextFunction } from 'express';
 
@@ -60,18 +60,7 @@ import {
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agents (
-      id               TEXT PRIMARY KEY,
-      capabilities     TEXT NOT NULL,
-      pricingXLM       REAL NOT NULL,
-      endpoint         TEXT NOT NULL,
-      stellarPublicKey TEXT NOT NULL,
-      reputationScore  REAL NOT NULL DEFAULT 0,
-      lastSeenAt       TEXT NOT NULL,
-      status           TEXT NOT NULL DEFAULT 'online'
-    )
-  `);
+  ensureAgentTable(db);
   return db;
 }
 

@@ -7,7 +7,10 @@ const pkg = require("../../package.json");
  * Reject known placeholder values for secret-bearing configuration keys.
  * This prevents accidental deployment with placeholder values from .env.example.
  */
-function rejectPlaceholder(value: string, ctx: z.RefinementCtx): void {
+function rejectPlaceholder(value: string | undefined, ctx: z.RefinementCtx): void {
+  // Optional keys are only checked when they are actually provided.
+  if (value === undefined) return;
+
   const lowerValue = value.toLowerCase();
   const placeholderPatterns = [
     /^your_.*_here$/,
@@ -27,6 +30,17 @@ function rejectPlaceholder(value: string, ctx: z.RefinementCtx): void {
     }
   }
 }
+
+/**
+ * Fallback secrets injected by `withRuntimeDefaults()`.
+ *
+ * These must not look like the placeholders rejected by `rejectPlaceholder()`
+ * (in particular they must not start with `test-`/`dev-`), otherwise the very
+ * defaults that make `NODE_ENV=test` and local development work would fail
+ * schema validation.
+ */
+const TEST_FALLBACK_JWT_SECRET = "ai-net-jest-suite-jwt-secret-0123456789abcdef";
+const DEV_FALLBACK_JWT_SECRET = "ai-net-local-development-jwt-secret-0123456789";
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
@@ -59,6 +73,11 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required").default("./data/ai-net.db"),
   DB_MIGRATIONS_DIR: z.string().optional(),
+  /** Apply pending schema migrations during server startup (Issue #274). */
+  AUTO_MIGRATE: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
   STELLAR_COORDINATOR_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   STELLAR_TEST_SECRET: z.string().optional().superRefine(rejectPlaceholder),
   ALLOWED_ORIGINS: z.string().default("http://localhost:3000"),
@@ -100,7 +119,29 @@ const envSchema = z.object({
   AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
 
   RECONCILIATION_WEBHOOK_URL: z.string().url().optional(),
-  RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(86_400_000),
+  RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  // ── Payment drift reconciliation (issue #496) ──────────────────────────────
+  /**
+   * Master switch for automatic drift remediation. When `false` a run only
+   * *detects* drift and reports it; nothing is written to the payments table.
+   */
+  RECONCILIATION_REMEDIATION_ENABLED: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .default("true"),
+  /**
+   * How long a `locked` escrow may sit on-chain after its task reached a
+   * terminal unsuccessful state before it is treated as expired and refunded.
+   */
+  RECONCILIATION_ESCROW_EXPIRY_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(86_400_000),
+  /** Maximum claimable balances pulled from Horizon in a single run. */
+  RECONCILIATION_MAX_BALANCES: z.coerce.number().int().positive().default(2_000),
+  /** Maximum release transactions verified against Horizon in a single run. */
+  RECONCILIATION_MAX_TX_LOOKUPS: z.coerce.number().int().positive().default(200),
 
   COMPRESSION_THRESHOLD: z.coerce.number().int().min(0).default(1024),
   COMPRESSION_LEVEL: z.coerce.number().int().min(1).max(9).default(6),
@@ -217,35 +258,42 @@ const envSchema = z.object({
   /** Directory for admin backups. Default: ./data/backups/admin */
   ADMIN_BACKUP_DIR: z.string().default("./data/backups/admin"),
 
-  // ── Agent Watchdog Configuration ──────────────────────────────────────────────
-  /** Agent heartbeat watchdog: grace period before eviction (Issue #379). */
-  AGENT_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
-  AGENT_WATCHDOG_GRACE_MINUTES: z.coerce.number().int().positive().default(10),
+  // ── Agent ownership proof (#557, #558) ───────────────────────────────────────
+  /**
+   * Lifetime of a single-use agent auth challenge. Kept short because a
+   * challenge is redeemed exactly once; 5 minutes covers clock skew.
+   */
+  AGENT_CHALLENGE_TTL_MS: z.coerce.number().int().positive().default(300_000),
+  /** Failed *unsigned* agent-auth attempts tolerated per IP per window. */
+  AGENT_AUTH_FAILURE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
+  /** Sliding window the failed unsigned agent-auth budget is measured over. */
+  AGENT_AUTH_FAILURE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * ISO-8601 date the unsigned register/heartbeat path stops being tolerated.
+   * Unset (the default) advertises no `Sunset` header yet.
+   */
+  AGENT_AUTH_SUNSET_DATE: z.string().optional(),
 
-  // ── Idempotency Store Configuration (Issue #657) ────────────────────────────
-  /** How long idempotency keys are retained before they can be replayed. Default: 24 h. */
-  IDEMPOTENCY_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
-  /** How often the background cleanup sweep runs to delete expired keys. Default: 5 min. */
-  IDEMPOTENCY_CLEANUP_MS: z.coerce.number().int().positive().default(300_000),
+  // ── Feature flags (#425) ────────────────────────────────────────────────────
+  /**
+   * Overrides for the compiled-in defaults in `services/featureFlags.ts`, which
+   * resolves them dynamically as `FEATURE_<FLAG_NAME>`. They must be declared
+   * here so Zod does not strip them from the parsed config: a key that is not
+   * in the schema can never be read back through `getConfig()`. Keep in sync
+   * with `KNOWN_FLAGS`; an empty value means "use the compiled-in default".
+   */
+  FEATURE_STREAMING_RESPONSES: z.string().optional(),
+  FEATURE_DAG_PREVIEW: z.string().optional(),
+  FEATURE_EXPERIMENTAL_AGENTS: z.string().optional(),
+  FEATURE_QUALITY_SCORER: z.string().optional(),
+  FEATURE_RECONCILIATION: z.string().optional(),
+  FEATURE_AGENT_OWNERSHIP_PROOF: z.string().optional(),
 
-  // ── Rate Limit Configuration ─────────────────────────────────────────────────
-  /** Per-route-group limits (token-bucket, per IP, rolling window) */
-  RATE_LIMIT_PUBLIC_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
-  RATE_LIMIT_PUBLIC_MAX_REQUESTS: z.coerce.number().int().positive().default(120),
-  RATE_LIMIT_AUTHED_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
-  RATE_LIMIT_AUTHED_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
-  RATE_LIMIT_ADMIN_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
-  RATE_LIMIT_ADMIN_MAX_REQUESTS: z.coerce.number().int().positive().default(20),
-
-  // ── Venice Cache Configuration ───────────────────────────────────────────────
-  /** Logical model version used in Venice response cache keys. */
-  VENICE_MODEL_VERSION: z.string().default("v1"),
-  /** Default Venice response cache TTL in milliseconds. */
-  VENICE_CACHE_TTL_MS: z.coerce.number().int().positive().default(86_400_000),
-  /** Shorter Venice cache TTL for coding-agent responses in milliseconds. */
-  VENICE_CACHE_CODING_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
-  /** Similarity threshold for semantic Venice cache reuse. */
-  VENICE_CACHE_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  // ── Job leases (#648) ───────────────────────────────────────────────────────
+  /** How long a worker's claim on a job stays valid without a heartbeat. */
+  JOB_LEASE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  /** How often a running job's lease is renewed — must be well inside the TTL. */
+  JOB_LEASE_HEARTBEAT_MS: z.coerce.number().int().positive().default(10_000),
 });
 
 export type RawConfig = z.infer<typeof envSchema>;
@@ -279,14 +327,14 @@ function withRuntimeDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
           EVENT_STORE_PATH: ":memory:",
           VENICE_API_KEY: "test-venice-key",
           LOG_LEVEL: "silent",
-          AUTH_JWT_SECRET: "test-jwt-secret-for-development-only",
+          AUTH_JWT_SECRET: TEST_FALLBACK_JWT_SECRET,
         }
       : {};
 
   const devDefaults =
     nodeEnv === "development"
       ? {
-          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? "dev-jwt-secret-change-in-production",
+          AUTH_JWT_SECRET: env.AUTH_JWT_SECRET ?? DEV_FALLBACK_JWT_SECRET,
         }
       : {};
 
@@ -339,7 +387,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // Warn in development if using default secret
   if (nodeEnv === "development") {
     const secret = result.data.AUTH_JWT_SECRET;
-    if (secret === "dev-jwt-secret-change-in-production") {
+    if (secret === DEV_FALLBACK_JWT_SECRET) {
       console.warn(
         "[config] WARNING: Using default AUTH_JWT_SECRET in development. " +
           "Set AUTH_JWT_SECRET to a secure random value in production."
